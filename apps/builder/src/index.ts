@@ -1,20 +1,21 @@
 import { KafkaIO, type RawCandleMessage } from './kafka.js';
 import type { Candle, Timeframe } from './candle.js';
 import { bucketStart, makeEmptyAgg, updateAgg } from './candle.js';
+import { buildFeature1m } from './feature.js';
 
 type MarketState = {
-  last1mBucket?: number;               // 마지막으로 확정/진행 중인 1m bucket start
-  last1mCandle?: Candle;               // 현재 진행중인 1m candle(업비트 ws가 업데이트 보내는 값)
-  agg: Partial<Record<Exclude<Timeframe,'1m'>, Candle>>; // 5m/15m/1h/4h 진행중 집계
+  last1mBucket?: number; // last seen 1m bucket start (ms)
+  last1mCandle?: Candle; // latest 1m candle update for current bucket (not closed yet)
+  agg: Partial<Record<Exclude<Timeframe, '1m'>, Candle>>; // in-progress aggregations
+  closed1mWindow: Candle[]; // rolling window of CLOSED 1m candles (for indicators/features)
 };
 
 function to1mCandle(raw: RawCandleMessage): Candle | null {
   const p = raw.payload;
   const market = raw.market;
 
-  // Upbit candle ws payload fields:
-  // code, candle_date_time_utc, candle_date_time_kst,
-  // opening_price, high_price, low_price, trade_price, candle_acc_trade_volume ...
+  // Upbit candle WS payload fields:
+  // code, candle_date_time_kst, opening_price, high_price, low_price, trade_price, candle_acc_trade_volume ...
   const kst = p?.candle_date_time_kst;
   const open = p?.opening_price;
   const high = p?.high_price;
@@ -25,8 +26,10 @@ function to1mCandle(raw: RawCandleMessage): Candle | null {
   if (!market || typeof kst !== 'string') return null;
   if (![open, high, low, close, vol].every((x: any) => typeof x === 'number')) return null;
 
-  // kst string example: "2026-01-06T01:23:00"
-  const ts = Date.parse(kst + '+09:00'); // ensure KST parse
+  // Example: "2026-01-06T01:23:00" (KST)
+  // Add timezone suffix to avoid local machine tz ambiguity.
+  const ts = Date.parse(kst + '+09:00');
+
   const openTime = bucketStart(ts, '1m');
   const closeTime = openTime + 60_000;
 
@@ -41,12 +44,12 @@ function to1mCandle(raw: RawCandleMessage): Candle | null {
     low,
     close,
     volume: vol,
-    is_closed: false,      // builder가 bucket rollover 시점에 true로 확정
+    is_closed: false, // will be closed when bucket rolls over
     source: 'ws_candle1m'
   };
 }
 
-function closeCandle(c: Candle): Candle {
+function closeCandle<T extends Candle>(c: T): T {
   return { ...c, is_closed: true };
 }
 
@@ -62,40 +65,48 @@ export class BuilderApp {
       const c1m = to1mCandle(raw);
       if (!c1m) return;
 
-      const key = c1m.market;
-      const st = this.state.get(key) ?? { agg: {} };
-      this.state.set(key, st);
+      const market = c1m.market;
+      const st = this.state.get(market) ?? { agg: {}, closed1mWindow: [] };
+      this.state.set(market, st);
 
-      // 1) 1m bucket rollover 감지
+      // 1) Detect 1m bucket rollover
       const bucket = c1m.open_time;
       const prevBucket = st.last1mBucket;
 
       if (prevBucket === undefined) {
+        // first candle for this market
         st.last1mBucket = bucket;
         st.last1mCandle = c1m;
-        // 1m 진행중 값도 emit 하고 싶으면 여기서 (하지만 우리는 "닫힌 봉" 위주로 downstream)
         return;
       }
 
       if (bucket === prevBucket) {
-        // 같은 1m bucket 업데이트(업비트 ws가 1초 단위로 업데이트)
+        // same 1m bucket: just update latest in-progress candle
         st.last1mCandle = c1m;
         return;
       }
 
-      // bucket이 바뀜 => 이전 1m candle 확정(close)
+      // 2) Bucket changed => finalize previous 1m candle
       const prev1m = st.last1mCandle;
       if (prev1m) {
         const closed1m = closeCandle(prev1m);
 
-        // (a) 1m 확정 캔들 emit
+        // (a) emit closed 1m candle
         await this.io.emitCandle(closed1m);
 
-        // (b) 상위 TF 집계에 반영
+        // (a-2) update rolling window (keep last 600 closed candles ~ 10 hours)
+        st.closed1mWindow.push(closed1m);
+        if (st.closed1mWindow.length > 600) st.closed1mWindow.shift();
+
+        // (a-3) build + emit 1m features
+        const feat = buildFeature1m(market, closed1m, st.closed1mWindow);
+        await this.io.emitFeature1m(feat);
+
+        // (b) update and emit higher timeframe candles as buckets roll
         await this.updateHigherAgg(st, closed1m);
       }
 
-      // 새로운 bucket으로 갱신
+      // 3) Start new bucket tracking
       st.last1mBucket = bucket;
       st.last1mCandle = c1m;
     });
@@ -107,19 +118,19 @@ export class BuilderApp {
 
   private async updateHigherAgg(st: MarketState, c1mClosed: Candle) {
     const market = c1mClosed.market;
-
-    const tfs: Exclude<Timeframe,'1m'>[] = ['5m','15m','1h','4h'];
+    const tfs: Exclude<Timeframe, '1m'>[] = ['5m', '15m', '1h', '4h'];
 
     for (const tf of tfs) {
       const b = bucketStart(c1mClosed.open_time, tf);
       const current = st.agg[tf];
 
       if (!current || current.open_time !== b) {
-        // 기존 agg가 있었으면 close 시켜서 emit
+        // close + emit previous aggregation if it exists
         if (current) {
           await this.io.emitCandle(closeCandle(current));
         }
-        // 새 agg 시작
+
+        // start new aggregation bucket with first 1m candle
         st.agg[tf] = makeEmptyAgg(market, tf, b, {
           open: c1mClosed.open,
           high: c1mClosed.high,
@@ -128,7 +139,7 @@ export class BuilderApp {
           volume: c1mClosed.volume
         });
       } else {
-        // 동일 bucket 업데이트
+        // update existing aggregation bucket
         st.agg[tf] = updateAgg(current, c1mClosed);
       }
     }
@@ -145,6 +156,7 @@ async function main() {
     await app.stop();
     process.exit(0);
   };
+
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
 }

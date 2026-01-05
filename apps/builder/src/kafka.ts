@@ -1,4 +1,5 @@
 import { Kafka, logLevel, type Consumer, type Producer } from 'kafkajs';
+import type { Feature1m } from './feature.js';
 import { config } from './config.js';
 import type { Candle } from './candle.js';
 
@@ -61,6 +62,18 @@ export class KafkaIO {
         {
           key: c.market,
           value: JSON.stringify(c)
+        }
+      ]
+    });
+  }
+
+  async emitFeature1m(f: Feature1m) {
+    await this.producer.send({
+      topic: config.kafka.outFeature1m,
+      messages: [
+        {
+          key: f.market,
+          value: JSON.stringify(f)
         }
       ]
     });

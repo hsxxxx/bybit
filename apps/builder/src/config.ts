@@ -16,7 +16,8 @@ export const config = {
     out5m: req('KAFKA_TOPIC_OUT_5M', 'upbit.candle.5m'),
     out15m: req('KAFKA_TOPIC_OUT_15M', 'upbit.candle.15m'),
     out1h: req('KAFKA_TOPIC_OUT_1H', 'upbit.candle.1h'),
-    out4h: req('KAFKA_TOPIC_OUT_4H', 'upbit.candle.4h')
+    out4h: req('KAFKA_TOPIC_OUT_4H', 'upbit.candle.4h'),
+    outFeature1m: req('KAFKA_TOPIC_OUT_FEATURE_1M', 'upbit.feature.1m')
   },
   logLevel: req('LOG_LEVEL', 'info')
 };
