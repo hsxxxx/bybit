@@ -1,21 +1,25 @@
+// apps/builder/src/index.ts
 import { KafkaIO, type RawCandleMessage } from './kafka.js';
 import type { Candle, Timeframe } from './candle.js';
 import { bucketStart, makeEmptyAgg, updateAgg } from './candle.js';
 import { buildFeature1m } from './feature.js';
+import { fetchKrwMarkets, fetchRecent1mClosedCandles, mapLimit } from './upbit_rest.js';
+
+const UPBIT_REST_URL = process.env.UPBIT_REST_URL ?? 'https://api.upbit.com/v1';
+const WARMUP_1M_COUNT = Number(process.env.WARMUP_1M_COUNT ?? '600');
+const WARMUP_CONCURRENCY = Number(process.env.WARMUP_CONCURRENCY ?? '3');
 
 type MarketState = {
-  last1mBucket?: number; // last seen 1m bucket start (ms)
-  last1mCandle?: Candle; // latest 1m candle update for current bucket (not closed yet)
-  agg: Partial<Record<Exclude<Timeframe, '1m'>, Candle>>; // in-progress aggregations
-  closed1mWindow: Candle[]; // rolling window of CLOSED 1m candles (for indicators/features)
+  last1mBucket?: number;
+  last1mCandle?: Candle;
+  agg: Partial<Record<Exclude<Timeframe, '1m'>, Candle>>;
+  closed1mWindow: Candle[];
 };
 
 function to1mCandle(raw: RawCandleMessage): Candle | null {
   const p = raw.payload;
   const market = raw.market;
 
-  // Upbit candle WS payload fields:
-  // code, candle_date_time_kst, opening_price, high_price, low_price, trade_price, candle_acc_trade_volume ...
   const kst = p?.candle_date_time_kst;
   const open = p?.opening_price;
   const high = p?.high_price;
@@ -26,10 +30,7 @@ function to1mCandle(raw: RawCandleMessage): Candle | null {
   if (!market || typeof kst !== 'string') return null;
   if (![open, high, low, close, vol].every((x: any) => typeof x === 'number')) return null;
 
-  // Example: "2026-01-06T01:23:00" (KST)
-  // Add timezone suffix to avoid local machine tz ambiguity.
   const ts = Date.parse(kst + '+09:00');
-
   const openTime = bucketStart(ts, '1m');
   const closeTime = openTime + 60_000;
 
@@ -44,7 +45,7 @@ function to1mCandle(raw: RawCandleMessage): Candle | null {
     low,
     close,
     volume: vol,
-    is_closed: false, // will be closed when bucket rolls over
+    is_closed: false,
     source: 'ws_candle1m'
   };
 }
@@ -61,6 +62,10 @@ export class BuilderApp {
     await this.io.connect();
     console.log('[builder] connected');
 
+    // 1) WARMUP before consuming Kafka
+    await this.warmup();
+
+    // 2) Consume raw 1m candle stream
     await this.io.run(async (raw) => {
       const c1m = to1mCandle(raw);
       if (!c1m) return;
@@ -69,44 +74,40 @@ export class BuilderApp {
       const st = this.state.get(market) ?? { agg: {}, closed1mWindow: [] };
       this.state.set(market, st);
 
-      // 1) Detect 1m bucket rollover
       const bucket = c1m.open_time;
       const prevBucket = st.last1mBucket;
 
       if (prevBucket === undefined) {
-        // first candle for this market
         st.last1mBucket = bucket;
         st.last1mCandle = c1m;
         return;
       }
 
       if (bucket === prevBucket) {
-        // same 1m bucket: just update latest in-progress candle
         st.last1mCandle = c1m;
         return;
       }
 
-      // 2) Bucket changed => finalize previous 1m candle
+      // bucket rollover => close previous 1m
       const prev1m = st.last1mCandle;
       if (prev1m) {
         const closed1m = closeCandle(prev1m);
 
-        // (a) emit closed 1m candle
+        // emit closed 1m
         await this.io.emitCandle(closed1m);
 
-        // (a-2) update rolling window (keep last 600 closed candles ~ 10 hours)
+        // update rolling window (keep last WARMUP_1M_COUNT candles)
         st.closed1mWindow.push(closed1m);
-        if (st.closed1mWindow.length > 600) st.closed1mWindow.shift();
+        if (st.closed1mWindow.length > WARMUP_1M_COUNT) st.closed1mWindow.shift();
 
-        // (a-3) build + emit 1m features
+        // build + emit feature (now it should have enough history immediately after warmup)
         const feat = buildFeature1m(market, closed1m, st.closed1mWindow);
         await this.io.emitFeature1m(feat);
 
-        // (b) update and emit higher timeframe candles as buckets roll
+        // update higher TF aggs
         await this.updateHigherAgg(st, closed1m);
       }
 
-      // 3) Start new bucket tracking
       st.last1mBucket = bucket;
       st.last1mCandle = c1m;
     });
@@ -114,6 +115,71 @@ export class BuilderApp {
 
   async stop() {
     await this.io.disconnect();
+  }
+
+  private async warmup() {
+    console.log(`[builder] warmup start: count=${WARMUP_1M_COUNT} concurrency=${WARMUP_CONCURRENCY}`);
+
+    const markets = await fetchKrwMarkets(UPBIT_REST_URL);
+    console.log(`[builder] warmup markets: ${markets.length}`);
+
+    await mapLimit(markets, WARMUP_CONCURRENCY, async (market) => {
+      try {
+        const candles = await fetchRecent1mClosedCandles({
+          restUrl: UPBIT_REST_URL,
+          market,
+          count: WARMUP_1M_COUNT
+        });
+
+        const st: MarketState = { agg: {}, closed1mWindow: candles };
+        // Prime aggregation states from history WITHOUT emitting
+        this.primeAggFromHistory(st, candles);
+
+        // Set last1mBucket to last closed candle bucket; next WS rollover will close correctly
+        const last = candles[candles.length - 1];
+        if (last) {
+          st.last1mBucket = last.open_time;
+          st.last1mCandle = last; // closed candle; will be replaced by live in-progress updates
+        }
+
+        this.state.set(market, st);
+
+        if (candles.length < 60) {
+          console.warn(`[builder] warmup 부족 market=${market} candles=${candles.length}`);
+        }
+      } catch (e) {
+        console.error(`[builder] warmup failed market=${market}`, e);
+        // still create empty state so live stream can fill
+        this.state.set(market, { agg: {}, closed1mWindow: [] });
+      }
+    });
+
+    console.log('[builder] warmup done');
+  }
+
+  private primeAggFromHistory(st: MarketState, candles: Candle[]) {
+    // Replay closed 1m candles to build the latest in-progress agg buckets (no emit)
+    const tfs: Exclude<Timeframe, '1m'>[] = ['5m', '15m', '1h', '4h'];
+
+    for (const c of candles) {
+      for (const tf of tfs) {
+        const b = bucketStart(c.open_time, tf);
+        const current = st.agg[tf];
+
+        if (!current || current.open_time !== b) {
+          // start new bucket (do NOT emit old one during warmup)
+          st.agg[tf] = makeEmptyAgg(c.market, tf, b, {
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+            volume: c.volume
+          });
+        } else {
+          st.agg[tf] = updateAgg(current, c);
+        }
+      }
+    }
   }
 
   private async updateHigherAgg(st: MarketState, c1mClosed: Candle) {
@@ -130,7 +196,7 @@ export class BuilderApp {
           await this.io.emitCandle(closeCandle(current));
         }
 
-        // start new aggregation bucket with first 1m candle
+        // start new aggregation bucket
         st.agg[tf] = makeEmptyAgg(market, tf, b, {
           open: c1mClosed.open,
           high: c1mClosed.high,
@@ -139,7 +205,6 @@ export class BuilderApp {
           volume: c1mClosed.volume
         });
       } else {
-        // update existing aggregation bucket
         st.agg[tf] = updateAgg(current, c1mClosed);
       }
     }
