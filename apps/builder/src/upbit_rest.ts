@@ -32,6 +32,32 @@ export async function fetchKrwMarkets(restUrl: string): Promise<string[]> {
   return json.map(x => x.market).filter(m => m.startsWith('KRW-')).sort();
 }
 
+async function requestJsonWithRetry(url: string, maxRetries = 8) {
+  let attempt = 0;
+  while (true) {
+    attempt += 1;
+    const res = await request(url);
+
+    if (res.statusCode === 200) {
+      return res.body.json();
+    }
+
+    const body = await res.body.text();
+
+    // Rate limit
+    if (res.statusCode === 429 && attempt <= maxRetries) {
+      // exponential backoff + jitter (ms)
+      const base = 500; // 0.5s
+      const wait = Math.min(30_000, base * Math.pow(2, attempt - 1)) + Math.floor(Math.random() * 250);
+      console.warn(`[builder] 429 rate-limited. retry in ${wait}ms (attempt ${attempt}/${maxRetries}) url=${url}`);
+      await sleep(wait);
+      continue;
+    }
+
+    throw new Error(`${res.statusCode} ${body}`);
+  }
+}
+
 function toIsoKst(ms: number): string {
   // Upbit accepts ISO8601; safest is UTC ISO string.
   // We'll pass UTC ISO string for "to".
@@ -81,11 +107,8 @@ export async function fetchRecent1mClosedCandles(params: {
       `${restUrl}/candles/minutes/1?market=${encodeURIComponent(market)}` +
       `&count=${chunk}&to=${encodeURIComponent(toIsoKst(toMs))}`;
 
-    const res = await request(url);
-    if (res.statusCode !== 200) {
-      throw new Error(`candles/minutes/1 failed market=${market}: ${res.statusCode} ${await res.body.text()}`);
-    }
-    const arr = (await res.body.json()) as UpbitMinuteCandle[];
+    const json = await requestJsonWithRetry(url);
+    const arr = json as UpbitMinuteCandle[];
     if (!Array.isArray(arr) || arr.length === 0) break;
 
     // Upbit returns newest-first; convert to candles then reverse to chronological when we finalize
@@ -100,7 +123,7 @@ export async function fetchRecent1mClosedCandles(params: {
     toMs = oldest.open_time;
 
     // be gentle to REST
-    await sleep(60);
+    await sleep(120);
   }
 
   // out is in newest-first chunks appended, still overall "newest-first-ish"
