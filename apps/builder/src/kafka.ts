@@ -1,7 +1,7 @@
 import { Kafka, logLevel, type Consumer, type Producer } from 'kafkajs';
-import type { Feature1m } from './feature.js';
 import { config } from './config.js';
 import type { Candle } from './candle.js';
+import type { Indicator } from './indicator.js';
 
 export type RawCandleMessage = {
   exchange: 'upbit';
@@ -67,15 +67,17 @@ export class KafkaIO {
     });
   }
 
-  async emitFeature1m(f: Feature1m) {
+  async emitIndicator(ind: Indicator) {
+    const topic =
+      ind.tf === '1m' ? config.kafka.outInd1m :
+      ind.tf === '5m' ? config.kafka.outInd5m :
+      ind.tf === '15m' ? config.kafka.outInd15m :
+      ind.tf === '1h' ? config.kafka.outInd1h :
+      config.kafka.outInd4h;
+
     await this.producer.send({
-      topic: config.kafka.outFeature1m,
-      messages: [
-        {
-          key: f.market,
-          value: JSON.stringify(f)
-        }
-      ]
+      topic,
+      messages: [{ key: ind.market, value: JSON.stringify(ind) }]
     });
   }
 }
