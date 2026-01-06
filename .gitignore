@@ -1,0 +1,95 @@
+# =========================
+# OS / Editor
+# =========================
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.log
+
+# =========================
+# Node / JS / TS
+# =========================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build outputs
+dist/
+build/
+.out/
+.next/
+coverage/
+
+# =========================
+# Environment variables
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# TypeScript
+# =========================
+*.tsbuildinfo
+
+# =========================
+# Next.js
+# =========================
+.next/
+out/
+
+# =========================
+# Vite / Turbo / Monorepo
+# =========================
+.turbo/
+.pnpm-store/
+pnpm-lock.yaml
+yarn.lock
+package-lock.json
+
+# =========================
+# Kafka / Runtime artifacts
+# =========================
+*.pid
+*.sock
+
+# =========================
+# Temporary / Cache
+# =========================
+.cache/
+.tmp/
+temp/
+tmp/
+
+# =========================
+# Database / Dumps
+# =========================
+*.sql
+*.dump
+*.bak
+
+# =========================
+# Python (혹시 나중에 쓰면)
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# =========================
+# IDE
+# =========================
+.vscode/
+.idea/
+*.iml
+
+# =========================
+# Test / Local data
+# =========================
+data/
+logs/
