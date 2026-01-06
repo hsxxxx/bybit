@@ -58,48 +58,76 @@ async function startConsumerOnce() {
   });
 
   const consumer = kafka.consumer({ groupId: process.env.KAFKA_GROUP_ID ?? 'bits-viewer-v1' });
+  const admin = kafka.admin();
 
   const TOPIC_CANDLE_1M = process.env.TOPIC_CANDLE_1M ?? 'upbit.candle.1m';
   const TOPIC_IND_1M = process.env.TOPIC_INDICATOR_1M ?? 'upbit.indicator.1m';
 
+  const BACKFILL = Math.max(0, Number(process.env.KAFKA_BACKFILL_MESSAGES ?? '0'));
+
   await consumer.connect();
+  await admin.connect();
+
   await consumer.subscribe({ topic: TOPIC_CANDLE_1M, fromBeginning: false });
   await consumer.subscribe({ topic: TOPIC_IND_1M, fromBeginning: false });
 
   const store = ensureStore();
+
+  // ✅ group join 시점에 파티션별로 "최근 BACKFILL개"부터 읽도록 seek
+  const { GROUP_JOIN } = consumer.events;
+
+  consumer.on(GROUP_JOIN, async () => {
+    if (!BACKFILL) return;
+
+    // topic별 파티션 high watermark를 보고 start offset 계산
+    for (const topic of [TOPIC_CANDLE_1M, TOPIC_IND_1M]) {
+      const offsets = await admin.fetchTopicOffsets(topic);
+      for (const o of offsets) {
+        const partition = Number(o.partition);
+        const high = Number(o.high); // next offset (end)
+        const low = Number(o.low);
+
+        const start = Math.max(low, high - BACKFILL);
+        // kafkajs seek offset must be string
+        consumer.seek({ topic, partition, offset: String(start) });
+      }
+    }
+
+    console.log(`[viewer] backfill seek applied: per-partition last ${BACKFILL} msgs`);
+  });
 
   await consumer.run({
     autoCommit: true,
     eachMessage: async ({ topic, message }) => {
       if (!message.value) return;
       const txt = message.value.toString('utf8');
+
       try {
         const obj = JSON.parse(txt);
 
-        // candle
         if (topic === TOPIC_CANDLE_1M) {
           const c = obj as Candle;
           if (!c?.market || !c?.tf) return;
           const key = getKey(c.market, c.tf);
           ensureRing(store.candles, key).push(c);
-          // fanout to WS clients (optional, via wsServer singleton)
+
           const ws = (globalThis as any).__BITS_VIEWER_WS__;
           ws?.broadcast?.({ type: 'candle', data: c });
           return;
         }
 
-        // indicator
         if (topic === TOPIC_IND_1M) {
           const ind = obj as Indicator;
           if (!ind?.market || !ind?.tf) return;
           const key = getKey(ind.market, ind.tf);
           ensureRing(store.indicators, key).push(ind);
+
           const ws = (globalThis as any).__BITS_VIEWER_WS__;
           ws?.broadcast?.({ type: 'indicator', data: ind });
           return;
         }
       } catch {
-        // ignore malformed
+        // ignore
       }
     },
   });
