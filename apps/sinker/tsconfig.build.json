@@ -1,0 +1,15 @@
+{
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+      "outDir": "dist",
+      "noEmit": false,
+      "module": "CommonJS",
+      "moduleResolution": "Node",
+      "declaration": false,
+      "sourceMap": true,
+      "removeComments": true
+    },
+    "include": ["src/**/*.ts", "scripts/**/*.ts"],
+    "exclude": ["node_modules", "dist", ".next"]
+  }
+  

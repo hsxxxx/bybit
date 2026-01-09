@@ -2,11 +2,10 @@
   "name": "@bits/viewer",
   "version": "1.0.0",
   "private": true,
-  "type": "module",
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
+    "build": "next build && tsc -p tsconfig.build.json",
+    "start": "next start -p 3000",
     "ws": "tsx scripts/viewer-ws.ts",
     "proxy": "tsx scripts/reverse-proxy.ts",
     "lint": "next lint"
