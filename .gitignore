@@ -91,3 +91,6 @@ venv/
 # Test / Local data
 # =========================
 logs/
+data/
+!src/data/
+!src/data/**/*
