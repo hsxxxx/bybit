@@ -1,0 +1,9 @@
+:3000 {
+  @ws path /ws
+  reverse_proxy @ws localhost:3101
+
+  @api path /api/*
+  reverse_proxy @api localhost:3101
+
+  reverse_proxy localhost:3001
+}

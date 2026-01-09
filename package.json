@@ -1,0 +1,15 @@
+{
+  "name": "bits",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "i:all": "npm install",
+    "build": "npm -ws run build",
+    "start:pm2": "pm2 start apps/ecosystem.config.js",
+    "stop:pm2": "pm2 stop all",
+    "logs:pm2": "pm2 logs"
+  }
+}
