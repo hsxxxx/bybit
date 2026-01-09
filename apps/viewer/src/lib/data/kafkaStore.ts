@@ -152,8 +152,8 @@ export function getSnapshot(market: string, tf: Timeframe, limit: number) {
   const store = ensureStore();
   const key = getKey(market, tf);
 
-  const rawCandles = store.candles.get(key)?.toArray(limit) ?? [];
-  const rawIndicators = store.indicators.get(key)?.toArray(limit) ?? [];
+  const rawCandles = store.candles.get(key)?.toArray().slice(-limit) ?? [];
+  const rawIndicators = store.indicators.get(key)?.toArray().slice(-limit) ?? [];
 
   const candles = normalizeAscUniqueByTime(rawCandles, getCandleTime);
   const indicators = normalizeAscUniqueByTime(rawIndicators, getIndicatorTime);
