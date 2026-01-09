@@ -1,7 +1,7 @@
 // apps/viewer/src/lib/data/kafkaStore.ts
 import { Kafka } from "kafkajs";
 import { Ring } from "./ring";
-import type { Candle, Indicator, Timeframe } from "./types";
+import type { Candle, Indicator, Timeframe } from "../market/types";
 
 type MarketKey = `${string}:${Timeframe}`; // e.g. "KRW-BTC:1m"
 
