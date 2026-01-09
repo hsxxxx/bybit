@@ -167,7 +167,7 @@ export function getSnapshot(market: string, tf: Timeframe, limit: number) {
 export function getLastCandle(market: string, tf: Timeframe): Candle | null {
   const store = ensureStore();
   const key = getKey(market, tf);
-  const last = store.candles.get(key)?.toArray(1)?.[0] ?? null;
+  const last = store.candles.get(key)?.toArray().slice(-1)[0] ?? null;
   return last;
 }
 
