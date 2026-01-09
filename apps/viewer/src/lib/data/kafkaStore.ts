@@ -267,6 +267,8 @@ async function startConsumerOnce() {
 
           const c = raw as Candle;
 
+          if (!c.market || !c.tf) return; // market/tf 없으면 무시(타입+데이터 안전)
+
           const key = getKey(c.market, c.tf);
           ensureRing(store.candles, key).push(c);
 
