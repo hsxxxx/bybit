@@ -2,6 +2,7 @@
 import { Kafka } from "kafkajs";
 import { Ring } from "./ring";
 import type { Candle, Indicator, Timeframe } from "../market/types";
+import { isTimeframe } from "../market/timeframes";
 
 type MarketKey = `${string}:${Timeframe}`; // e.g. "KRW-BTC:1m"
 
@@ -293,9 +294,12 @@ async function startConsumerOnce() {
 
           const ind = raw as Indicator;
 
+          if (typeof ind.market !== "string") return;
+          if (!isTimeframe(ind.tf)) return;
+          
           const key = getKey(ind.market, ind.tf);
           ensureRing(store.indicators, key).push(ind);
-
+          
           emit({ type: "indicator", topic, data: ind });
 
           const ws = (globalThis as any).__BITS_VIEWER_WS__;

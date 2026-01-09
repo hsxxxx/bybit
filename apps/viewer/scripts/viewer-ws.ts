@@ -10,6 +10,7 @@ import {
   subscribeIndicatorStream,
   getSnapshot,
 } from "../src/lib/data/kafkaStore";
+import { ALLOWED_TFS, isTimeframe } from "../src/lib/market/timeframes";
 
 const HOST = process.env.WS_HOST ?? "0.0.0.0";
 const PORT = Number(process.env.PORT_WS ?? "3101");
@@ -41,8 +42,6 @@ type Sub = {
   lastIndTime?: number;
 };
 
-const ALLOWED_TFS: Timeframe[] = ["1m", "5m", "15m", "1h", "4h"];
-
 function safeSend(ws: WebSocket, msg: ServerMsg) {
   if (ws.readyState !== ws.OPEN) return;
   try { ws.send(JSON.stringify(msg)); } catch {}
@@ -50,10 +49,6 @@ function safeSend(ws: WebSocket, msg: ServerMsg) {
 
 function parseMsg(raw: string): ClientMsg | null {
   try { return JSON.parse(raw); } catch { return null; }
-}
-
-function isTimeframe(tf: any): tf is Timeframe {
-  return typeof tf === "string" && (ALLOWED_TFS as string[]).includes(tf);
 }
 
 function normalizeInclude(v: any): Set<"candle" | "indicator"> {

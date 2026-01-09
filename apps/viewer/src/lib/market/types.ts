@@ -3,19 +3,23 @@
 export type Timeframe = "1m" | "3m" | "5m" | "15m" | "30m" | "1h" | "4h" | "1d";
 
 export type Candle = {
-  market?: string;
+  market: string;
+  tf: Timeframe;
+
   time: number; // unix seconds
   open: number;
   high: number;
   low: number;
   close: number;
   volume?: number;
+
   [key: string]: unknown;
 };
 
 export type Indicator = {
-  market?: string;
-  tf?: Timeframe;
+  market: string;
+  tf: Timeframe;
+
   time: number; // unix seconds
 
   kind:
@@ -31,6 +35,7 @@ export type Indicator = {
 
   value?: number;
   values?: Record<string, number>;
+
   [key: string]: unknown;
 };
 
