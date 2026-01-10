@@ -66,34 +66,38 @@ async function main() {
     name: must(process.env.DB_NAME, "DB_NAME")
   };
 
-  // 1) 먼저 DB 연결해서 전체 market/tf 자동 확장 가능하게
+  // 1) DB 연결 후 MARKETS/TFS ALL 자동확장
   const maria = await createMaria(dbConfig);
 
   try {
     const rawMarkets = parseCsv(process.env.MARKETS);
     const rawTfs = parseTfCsv(process.env.TFS);
 
-    // MARKETS / TFS 자동 확장
     let markets: string[];
     let tfs: Tf[];
 
-    if (isAllToken(rawMarkets)) {
-      markets = await maria.getAllMarkets();
-    } else {
-      markets = rawMarkets;
-    }
+    if (isAllToken(rawMarkets)) markets = await maria.getAllMarkets();
+    else markets = rawMarkets;
 
-    if (isAllToken(rawTfs as unknown as string[])) {
-      tfs = await maria.getAllTfs();
-    } else {
-      tfs = rawTfs;
-    }
+    if (isAllToken(rawTfs as unknown as string[])) tfs = await maria.getAllTfs();
+    else tfs = rawTfs;
 
     if (markets.length === 0) throw new Error("No markets resolved (upbit_candle is empty?)");
     if (tfs.length === 0) throw new Error("No tfs resolved (upbit_candle is empty?)");
 
+    // 2) 범위 파싱
     const { startSec, endSec } = parseDateRangeSec(process.env.START_DATE, process.env.END_DATE);
 
+    // 3) end 마진 적용 (최근/경계 구간 흔들림 방지)
+    // 예: END_MARGIN_SEC=86400 (1일), 43200(12시간) 등
+    const endMarginSec = Number(process.env.END_MARGIN_SEC ?? "0");
+    const safeEndSec = Math.max(startSec, endSec - endMarginSec);
+
+    if (!(startSec < safeEndSec)) {
+      throw new Error(`Invalid safe range after END_MARGIN_SEC=${endMarginSec}: startSec=${startSec}, endSec=${endSec}, safeEndSec=${safeEndSec}`);
+    }
+
+    // 4) Kafka 설정
     const kafkaEnabled = mode === "republish";
     const kafkaBrokers = parseCsv(process.env.KAFKA_BROKERS);
 
@@ -104,11 +108,11 @@ async function main() {
       tfs,
 
       startSec,
-      endSec,
+      endSec: safeEndSec,
 
       maxMissingPerMarket: Number(process.env.MAX_MISSING_PER_MARKET ?? "5000"),
-      restConcurrency: Number(process.env.REST_CONCURRENCY ?? "3"),
-      restSleepMs: Number(process.env.REST_SLEEP_MS ?? "120"),
+      restConcurrency: Number(process.env.REST_CONCURRENCY ?? "1"),
+      restSleepMs: Number(process.env.REST_SLEEP_MS ?? "400"),
 
       kafka: {
         enabled: kafkaEnabled,
@@ -124,6 +128,10 @@ async function main() {
         baseUrl: process.env.UPBIT_REST_BASE ?? "https://api.upbit.com"
       }
     };
+
+    console.log(
+      `[recovery] range start=${cfg.startSec} end=${endSec} safeEnd=${cfg.endSec} (END_MARGIN_SEC=${endMarginSec}) markets=${cfg.markets.length} tfs=${cfg.tfs.length} mode=${cfg.mode}`
+    );
 
     await runRecovery(cfg);
   } finally {
