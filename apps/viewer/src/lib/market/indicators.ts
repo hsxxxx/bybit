@@ -1,8 +1,12 @@
 import type { Candle } from "./types";
 
+/**
+ * RSI (Wilder smoothing)
+ * - output: number | null (초기 구간 null)
+ */
 export function calcRSI(closes: number[], length = 14): (number | null)[] {
   const out: (number | null)[] = Array(closes.length).fill(null);
-  if (closes.length < length + 1) return out;
+  if (!Array.isArray(closes) || closes.length < length + 1) return out;
 
   let gain = 0;
   let loss = 0;
@@ -34,6 +38,14 @@ export function calcRSI(closes: number[], length = 14): (number | null)[] {
   return out;
 }
 
+/**
+ * StochRSI
+ * - input: rsi array (number|null)
+ * - output: k/d (number|null)
+ *
+ * 주의:
+ * - window에서 null이 섞이면 해당 시점 결과는 null 유지(정상)
+ */
 export function calcStochRSI(
   rsi: (number | null)[],
   stochLen = 14,
@@ -50,6 +62,7 @@ export function calcStochRSI(
       .slice(i - stochLen + 1, i + 1)
       .filter((v): v is number => v !== null);
 
+    // rsi가 null 없이 stochLen개가 모두 있어야 계산
     if (window.length !== stochLen) continue;
 
     const min = Math.min(...window);
@@ -79,9 +92,14 @@ export function calcStochRSI(
   return { k, d };
 }
 
+/**
+ * OBV
+ * - input: candles
+ * - output: number|null (첫 값 0)
+ */
 export function calcOBV(candles: Candle[]): (number | null)[] {
   const out: (number | null)[] = Array(candles.length).fill(null);
-  if (!candles.length) return out;
+  if (!Array.isArray(candles) || candles.length === 0) return out;
 
   let obv = 0;
   out[0] = obv;
@@ -100,9 +118,14 @@ export function calcOBV(candles: Candle[]): (number | null)[] {
   return out;
 }
 
+/**
+ * PVT
+ * - input: candles
+ * - output: number|null (첫 값 0)
+ */
 export function calcPVT(candles: Candle[]): (number | null)[] {
   const out: (number | null)[] = Array(candles.length).fill(null);
-  if (!candles.length) return out;
+  if (!Array.isArray(candles) || candles.length === 0) return out;
 
   let pvt = 0;
   out[0] = pvt;
