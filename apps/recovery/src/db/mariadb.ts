@@ -4,13 +4,10 @@ import type { Candle, Tf } from "../types.js";
 
 export type Maria = {
   close(): Promise<void>;
-  getExistingTimes(params: {
-    market: string;
-    tf: Tf;
-    startSec: number;
-    endSec: number;
-  }): Promise<Set<number>>;
+  getExistingTimes(...): Promise<Set<number>>;
   upsertCandles(candles: Candle[]): Promise<void>;
+  getAllMarkets(): Promise<string[]>;
+  getAllTfs(): Promise<Tf[]>;
 };
 
 export async function createMaria(params: {
@@ -77,4 +74,18 @@ export async function createMaria(params: {
   }
 
   return { close, getExistingTimes, upsertCandles };
+}
+
+async function getAllMarkets(): Promise<string[]> {
+  const [rows] = await pool.query(`
+    SELECT DISTINCT market FROM upbit_candle
+  `);
+  return (rows as any[]).map(r => r.market);
+}
+
+async function getAllTfs(): Promise<Tf[]> {
+  const [rows] = await pool.query(`
+    SELECT DISTINCT tf FROM upbit_candle
+  `);
+  return (rows as any[]).map(r => r.tf);
 }
