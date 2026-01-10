@@ -4,8 +4,16 @@ import type { Candle, Tf } from "../types.js";
 
 export type Maria = {
   close(): Promise<void>;
-  getExistingTimes(...): Promise<Set<number>>;
+
+  getExistingTimes(params: {
+    market: string;
+    tf: Tf;
+    startSec: number;
+    endSec: number;
+  }): Promise<Set<number>>;
+
   upsertCandles(candles: Candle[]): Promise<void>;
+
   getAllMarkets(): Promise<string[]>;
   getAllTfs(): Promise<Tf[]>;
 };
@@ -45,9 +53,17 @@ export async function createMaria(params: {
         AND time >= ?
         AND time < ?
     `;
-    const [rows] = await pool.query(sql, [p.market, p.tf, p.startSec, p.endSec]);
+    const [rows] = await pool.query(sql, [
+      p.market,
+      p.tf,
+      p.startSec,
+      p.endSec
+    ]);
+
     const set = new Set<number>();
-    for (const r of rows as any[]) set.add(Number(r.time));
+    for (const r of rows as any[]) {
+      set.add(Number(r.time));
+    }
     return set;
   }
 
@@ -67,25 +83,38 @@ export async function createMaria(params: {
     `;
 
     const values = candles.map(c => [
-      c.market, c.tf, c.time, c.open, c.high, c.low, c.close, c.volume
+      c.market,
+      c.tf,
+      c.time,
+      c.open,
+      c.high,
+      c.low,
+      c.close,
+      c.volume
     ]);
 
     await pool.query(sql, [values]);
   }
 
-  return { close, getExistingTimes, upsertCandles };
-}
+  async function getAllMarkets(): Promise<string[]> {
+    const [rows] = await pool.query(`
+      SELECT DISTINCT market FROM upbit_candle
+    `);
+    return (rows as any[]).map(r => r.market);
+  }
 
-async function getAllMarkets(): Promise<string[]> {
-  const [rows] = await pool.query(`
-    SELECT DISTINCT market FROM upbit_candle
-  `);
-  return (rows as any[]).map(r => r.market);
-}
+  async function getAllTfs(): Promise<Tf[]> {
+    const [rows] = await pool.query(`
+      SELECT DISTINCT tf FROM upbit_candle
+    `);
+    return (rows as any[]).map(r => r.tf as Tf);
+  }
 
-async function getAllTfs(): Promise<Tf[]> {
-  const [rows] = await pool.query(`
-    SELECT DISTINCT tf FROM upbit_candle
-  `);
-  return (rows as any[]).map(r => r.tf);
+  return {
+    close,
+    getExistingTimes,
+    upsertCandles,
+    getAllMarkets,
+    getAllTfs
+  };
 }
