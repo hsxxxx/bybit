@@ -162,7 +162,8 @@ export async function fetchUpbitCandlesRange(p: Params): Promise<FetchResult> {
 
   while (true) {
     // inclusive/exclusive 경계 꼬임 방지: to = (cursorToSec - 1초)
-    const toStr = fmtUpbitToUTC(Math.max(p.startSec, cursorToSec) - 1);
+    const step = TF_SEC[p.tf];
+    const toStr = fmtUpbitToUTC(Math.max(p.startSec, cursorToSec + step) - 1);
 
     const url =
       `${endpoint}?market=${encodeURIComponent(p.market)}` +
