@@ -74,9 +74,11 @@ export async function runRecovery(args: {
     limitPerReq: args.limitPerReq,
     throttleMs: args.throttleMs,
     // 진행 로그(멈춘 것처럼 보이는 문제 해결)
-    onPage: ({ market, got, cursorKst }) => {
+    onPage: ({ market, got, oldestKst, cursorUtc }) => {
       if (process.env.RECOVERY_DEBUG === "1") {
-        console.log(`[page] ${args.tf} ${market} got=${got} cursor=${cursorKst}`);
+        console.log(
+          `[page] ${args.tf} ${market} got=${got} oldestKst=${oldestKst} cursorUtc=${cursorUtc}`
+        );
       }
     },
   });
