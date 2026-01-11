@@ -1,6 +1,7 @@
 import { request } from "undici";
 import type { Timeframe, UpbitCandle } from "./types";
 import { tfToMinutes } from "./utils/time";
+import { log } from "./logger";
 
 const BASE = "https://api.upbit.com";
 
@@ -9,11 +10,38 @@ async function sleep(ms: number) {
 }
 
 function jitter(ms: number) {
-  const j = Math.floor(Math.random() * Math.min(250, ms * 0.1));
+  const j = Math.floor(Math.random() * Math.min(400, ms * 0.2));
   return ms + j;
 }
 
+/**
+ * Upbit는 (특히 candles) 429가 매우 빈번함.
+ * 전역 RateLimiter로 모든 요청을 직렬/완만하게 흘려서 429 자체를 줄인다.
+ */
+class RateLimiter {
+  private nextAllowedAt = 0;
+
+  constructor(private minIntervalMs: number) {}
+
+  async wait() {
+    const now = Date.now();
+    const waitMs = this.nextAllowedAt - now;
+    if (waitMs > 0) await sleep(waitMs);
+    // 다음 요청 가능 시각 예약
+    this.nextAllowedAt = Math.max(this.nextAllowedAt, Date.now()) + this.minIntervalMs;
+  }
+
+  bump(extraMs: number) {
+    this.nextAllowedAt = Math.max(this.nextAllowedAt, Date.now()) + extraMs;
+  }
+}
+
+// 기본: 1초에 1회 정도 (CONCURRENCY를 1~2로 두고도 429 방지)
+const limiter = new RateLimiter(1100);
+
 async function requestJson<T>(url: string, timeoutMs: number): Promise<{ status: number; body: T | string }> {
+  await limiter.wait();
+
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), timeoutMs);
 
@@ -21,14 +49,11 @@ async function requestJson<T>(url: string, timeoutMs: number): Promise<{ status:
     const res = await request(url, {
       method: "GET",
       signal: ac.signal,
-      headers: {
-        "accept": "application/json"
-      }
+      headers: { accept: "application/json" }
     });
 
     const status = res.statusCode;
 
-    // 에러 바디도 문자열로 확보
     if (status !== 200) {
       const text = await res.body.text();
       return { status, body: text };
@@ -43,7 +68,7 @@ async function requestJson<T>(url: string, timeoutMs: number): Promise<{ status:
 
 export async function fetchMarkets(marketFilter?: string): Promise<string[]> {
   const url = `${BASE}/v1/market/all?isDetails=false`;
-  const r = await requestJson<Array<{ market: string }>>(url, 10_000);
+  const r = await requestJson<Array<{ market: string }>>(url, 15_000);
 
   if (r.status !== 200) {
     throw new Error(`Upbit markets error: ${r.status} ${String(r.body).slice(0, 200)}`);
@@ -57,10 +82,10 @@ export async function fetchMarkets(marketFilter?: string): Promise<string[]> {
 export async function fetchCandlesChunk(params: {
   market: string;
   tf: Timeframe;
-  toKstIso?: string; // "YYYY-MM-DDTHH:mm:ss"
-  count: number; // <= 200
-  timeoutMs?: number; // default 10s
-  maxRetry?: number; // default 8
+  toKstIso?: string;
+  count: number;
+  timeoutMs?: number;
+  maxRetry?: number;
 }): Promise<UpbitCandle[]> {
   const unit = tfToMinutes(params.tf);
   const qs: string[] = [
@@ -71,37 +96,41 @@ export async function fetchCandlesChunk(params: {
 
   const url = `${BASE}/v1/candles/minutes/${unit}?${qs.join("&")}`;
 
-  const timeoutMs = params.timeoutMs ?? 10_000;
-  const maxRetry = params.maxRetry ?? 8;
+  const timeoutMs = params.timeoutMs ?? 12_000;
+  const maxRetry = params.maxRetry ?? 12;
 
   for (let attempt = 0; attempt <= maxRetry; attempt++) {
-    let r;
+    let r: { status: number; body: UpbitCandle[] | string };
+
     try {
-      r = await requestJson<UpbitCandle[]>(url, timeoutMs);
+      r = (await requestJson<UpbitCandle[]>(url, timeoutMs)) as any;
     } catch (e: any) {
-      // 네트워크/Abort 등
-      const backoff = jitter(Math.min(15_000, 600 * Math.pow(2, attempt)));
+      const backoff = jitter(Math.min(20_000, 800 * Math.pow(2, attempt)));
+      log.warn(`[upbit] network/timeout retry`, { market: params.market, tf: params.tf, attempt, backoff });
+      limiter.bump(backoff);
       await sleep(backoff);
       continue;
     }
 
     if (r.status === 200) return r.body as UpbitCandle[];
 
-    // 429: exponential backoff
     if (r.status === 429) {
-      const backoff = jitter(Math.min(20_000, 800 * Math.pow(2, attempt)));
+      // 429가 나오면 전역적으로 더 느리게
+      const backoff = jitter(Math.min(60_000, 2_000 * Math.pow(2, attempt)));
+      log.warn(`[upbit] 429 rate limited`, { market: params.market, tf: params.tf, attempt, backoff });
+      limiter.bump(backoff);
       await sleep(backoff);
       continue;
     }
 
-    // 기타 5xx도 재시도
     if (r.status >= 500 && r.status <= 599) {
-      const backoff = jitter(Math.min(15_000, 600 * Math.pow(2, attempt)));
+      const backoff = jitter(Math.min(20_000, 800 * Math.pow(2, attempt)));
+      log.warn(`[upbit] 5xx retry`, { status: r.status, market: params.market, tf: params.tf, attempt, backoff });
+      limiter.bump(backoff);
       await sleep(backoff);
       continue;
     }
 
-    // 4xx는 즉시 실패
     throw new Error(`Upbit candles error: ${r.status} ${String(r.body).slice(0, 300)}`);
   }
 

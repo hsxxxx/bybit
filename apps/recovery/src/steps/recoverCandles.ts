@@ -39,7 +39,7 @@ export async function recoverCandlesForMarketTf(params: {
 
     const toIso = kstIsoFromEpochSeconds(cursorToSec);
 
-    // 시작 로그(가끔만)
+    // 너무 자주 찍지 않음(10회마다)
     if (loop === 1 || loop % 10 === 0) {
       log.info(`[candles] ${market} ${tf} fetching...`, { toIso, cursorToSec });
     }
@@ -49,8 +49,8 @@ export async function recoverCandlesForMarketTf(params: {
       tf,
       toKstIso: toIso,
       count: 200,
-      timeoutMs: 10_000,
-      maxRetry: 10
+      timeoutMs: 12_000,
+      maxRetry: 12
     });
 
     if (!candles || candles.length === 0) break;
@@ -59,7 +59,7 @@ export async function recoverCandlesForMarketTf(params: {
       .map((c) => toCandleRow(market, tf, c))
       .filter((r) => r.time >= startSec && r.time <= endSec);
 
-    await upsertCandles(params.pool, rows);
+    await upsertCandles(pool, rows);
     total += rows.length;
 
     const oldest = candles[candles.length - 1];
