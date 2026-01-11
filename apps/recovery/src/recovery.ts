@@ -11,6 +11,16 @@ type SlotPlan = {
   missingTimes: number[]; // seconds (candle open time)
 };
 
+type Range = { startSec: number; endSec: number };
+
+function envBool(name: string, def = false): boolean {
+  const v = process.env[name];
+  if (v == null) return def;
+  return ["1", "true", "yes", "y", "on"].includes(String(v).toLowerCase());
+}
+
+const DEBUG_RECOVERY = envBool("DEBUG_RECOVERY", false);
+
 export async function runRecovery(cfg: RecoveryConfig) {
   const maria = await createMaria(cfg.db);
 
@@ -27,7 +37,7 @@ export async function runRecovery(cfg: RecoveryConfig) {
       for (const tf of cfg.tfs) {
         const step = TF_SEC[tf];
 
-        // ✅ start/end 범위를 "expected 슬롯"과 "DB 조회"가 동일하게 되도록 정규화
+        // ✅ expected / DB 조회 범위가 항상 동일한 규칙이 되게 통일
         const start = floorToTfSec(cfg.startSec, tf);
         const end = floorToTfSec(cfg.endSec - 1, tf) + step; // exclusive
 
@@ -64,17 +74,23 @@ export async function runRecovery(cfg: RecoveryConfig) {
     for (const p of plans) {
       const step = TF_SEC[p.tf];
       const ranges = toContiguousRanges(p.missingTimes, step);
-      console.log(`[recovery] ${p.market} ${p.tf} missing=${p.missingTimes.length} ranges=${ranges.length}`);
 
-      const fetchedAll: Candle[] = [];
+      console.log(
+        `[recovery] ${p.market} ${p.tf} missing=${p.missingTimes.length} ranges=${ranges.length}`
+      );
+
       const missingSet = new Set(p.missingTimes);
 
+      const fetchedAll: Candle[] = [];
+
+      // ✅ 큐 기반 워커 (권장: REST_CONCURRENCY=1로 429 줄이기)
       const queue = ranges.slice();
       const workers = Array.from({ length: Math.max(1, cfg.restConcurrency) }, async () => {
         while (queue.length) {
           const r = queue.shift();
           if (!r) break;
 
+          // Upbit REST fetch (역방향 페이징 + 레이트리밋은 upbit.ts에서 처리)
           const candles = await fetchUpbitCandlesRange({
             baseUrl: cfg.upbit.baseUrl,
             market: p.market,
@@ -84,7 +100,26 @@ export async function runRecovery(cfg: RecoveryConfig) {
             sleepMs: cfg.restSleepMs
           });
 
-          // ✅ time이 시가 초로 정규화돼 있어야 missingSet과 매칭됨
+          if (DEBUG_RECOVERY) {
+            // ✅ 어디서 0이 되는지 한 줄로 확정
+            let inRange = 0;
+            let matched = 0;
+            let minT = Number.POSITIVE_INFINITY;
+            let maxT = 0;
+
+            for (const c of candles) {
+              if (c.time >= r.startSec && c.time < r.endSec) inRange++;
+              minT = Math.min(minT, c.time);
+              maxT = Math.max(maxT, c.time);
+              if (missingSet.has(c.time)) matched++;
+            }
+
+            console.log(
+              `[dbg] market=${p.market} tf=${p.tf} range=[${r.startSec},${r.endSec}) got=${candles.length} inRange=${inRange} matchedMissing=${matched} gotMin=${Number.isFinite(minT) ? minT : -1} gotMax=${maxT || -1}`
+            );
+          }
+
+          // ✅ missing에 해당하는 time만 수집
           for (const c of candles) {
             if (missingSet.has(c.time)) fetchedAll.push(c);
           }
@@ -93,8 +128,8 @@ export async function runRecovery(cfg: RecoveryConfig) {
 
       await Promise.all(workers);
 
+      // ✅ 정렬 + time uniq
       fetchedAll.sort((a, b) => a.time - b.time);
-
       const uniq: Candle[] = [];
       let prev = -1;
       for (const c of fetchedAll) {
@@ -114,7 +149,9 @@ export async function runRecovery(cfg: RecoveryConfig) {
       } else {
         if (!producer) throw new Error("RECOVERY_MODE=republish requires kafka enabled");
         await producer.sendCandles(cfg.kafka.topicCandle, uniq, cfg.kafka.batchBytes);
-        console.log(`[recovery] republished=${uniq.length} topic=${cfg.kafka.topicCandle} market=${p.market} tf=${p.tf}`);
+        console.log(
+          `[recovery] republished=${uniq.length} topic=${cfg.kafka.topicCandle} market=${p.market} tf=${p.tf}`
+        );
       }
     }
   } finally {
@@ -123,11 +160,11 @@ export async function runRecovery(cfg: RecoveryConfig) {
   }
 }
 
-function toContiguousRanges(times: number[], step: number): Array<{ startSec: number; endSec: number }> {
+function toContiguousRanges(times: number[], step: number): Range[] {
   if (times.length === 0) return [];
   const sorted = [...times].sort((a, b) => a - b);
 
-  const ranges: Array<{ startSec: number; endSec: number }> = [];
+  const ranges: Range[] = [];
   let s = sorted[0];
   let prev = sorted[0];
 
