@@ -19,14 +19,21 @@ function parseTfCsv(v: string | undefined): Tf[] {
   return parseCsv(v) as Tf[];
 }
 
+// ✅ FIX: 13자리 epoch(ms) 지원
 function parseDateOrSec(v: string): number {
+  // epoch seconds
   if (/^\d{10}$/.test(v)) return Number(v);
 
+  // epoch millis
+  if (/^\d{13}$/.test(v)) return Math.floor(Number(v) / 1000);
+
+  // yyyy-mm-dd => local midnight
   if (/^\d{4}-\d{2}-\d{2}$/.test(v)) {
     const [y, m, d] = v.split("-").map(Number);
     return Math.floor(new Date(y, m - 1, d, 0, 0, 0, 0).getTime() / 1000);
   }
 
+  // ISO etc
   const t = Date.parse(v);
   if (!Number.isFinite(t)) throw new Error(`Bad date/sec: ${v}`);
   return Math.floor(t / 1000);
@@ -102,7 +109,7 @@ async function main() {
     };
 
     console.log(
-      `[recovery] task=${cfg.task} range start=${cfg.startSec} end=${endSec} safeEnd=${cfg.endSec} markets=${cfg.markets.length} tfs=${cfg.tfs.length} noTradeMode=${cfg.noTradeMode}`
+      `[recovery] task=${cfg.task} range start=${cfg.startSec} end=${endSec} safeEnd=${cfg.endSec} (END_MARGIN_SEC=${endMarginSec}) markets=${cfg.markets.length} tfs=${cfg.tfs.length}`
     );
 
     await runRecovery(cfg);

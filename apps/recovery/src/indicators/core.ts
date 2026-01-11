@@ -31,15 +31,13 @@ type State = {
   prevClose: number | null;
   avgGain: number | null;
   avgLoss: number | null;
-
   rsiSeries: number[];
   stochKSeries: number[];
-
   obv: number;
   pvt: number;
 };
 
-export function createIndicatorState(): State {
+function createState(): State {
   return {
     closes: [],
     prevClose: null,
@@ -105,13 +103,14 @@ function stochRsiK(st: State, rsi: number, period: number): number | null {
   const window = st.rsiSeries.slice(st.rsiSeries.length - period);
   let lo = Infinity, hi = -Infinity;
   for (const v of window) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+
   const denom = hi - lo;
   const k = denom === 0 ? 0 : ((rsi - lo) / denom) * 100;
   return clamp(k, 0, 100);
 }
 
 export function computeIndicatorsForCandles(candlesAsc: Candle[], params = DEFAULT_PARAMS): IndicatorRow[] {
-  const st = createIndicatorState();
+  const st = createState();
   const out: IndicatorRow[] = [];
 
   for (const c of candlesAsc) {
@@ -139,7 +138,6 @@ export function computeIndicatorsForCandles(candlesAsc: Candle[], params = DEFAU
       }
     }
 
-    // OBV/PVT
     if (st.prevClose != null) {
       if (c.close > st.prevClose) st.obv += c.volume;
       else if (c.close < st.prevClose) st.obv -= c.volume;
