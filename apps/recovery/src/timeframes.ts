@@ -1,4 +1,4 @@
-// apps/recovery/src/timeframes.ts
+// apps/recovery/src/timeframes.ts  (기존 유지 + 1d 지원만 추가/전체)
 import type { Tf } from "./types.js";
 
 export const TF_SEC: Record<Tf, number> = {

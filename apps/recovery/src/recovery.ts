@@ -8,7 +8,7 @@ import { fetchUpbitCandlesRange } from "./exchange/upbit.js";
 type SlotPlan = {
   market: string;
   tf: Tf;
-  missingTimes: number[]; // seconds
+  missingTimes: number[]; // seconds (candle open time)
 };
 
 export async function runRecovery(cfg: RecoveryConfig) {
@@ -25,8 +25,13 @@ export async function runRecovery(cfg: RecoveryConfig) {
 
     for (const market of cfg.markets) {
       for (const tf of cfg.tfs) {
+        const step = TF_SEC[tf];
+
+        // ✅ start/end 범위를 "expected 슬롯"과 "DB 조회"가 동일하게 되도록 정규화
         const start = floorToTfSec(cfg.startSec, tf);
-        const end = floorToTfSec(cfg.endSec, tf);
+        const end = floorToTfSec(cfg.endSec - 1, tf) + step; // exclusive
+
+        if (!(start < end)) continue;
 
         const expected = rangeSlotsSec(start, end, tf);
         const existing = await maria.getExistingTimes({
@@ -79,6 +84,7 @@ export async function runRecovery(cfg: RecoveryConfig) {
             sleepMs: cfg.restSleepMs
           });
 
+          // ✅ time이 시가 초로 정규화돼 있어야 missingSet과 매칭됨
           for (const c of candles) {
             if (missingSet.has(c.time)) fetchedAll.push(c);
           }
@@ -88,6 +94,7 @@ export async function runRecovery(cfg: RecoveryConfig) {
       await Promise.all(workers);
 
       fetchedAll.sort((a, b) => a.time - b.time);
+
       const uniq: Candle[] = [];
       let prev = -1;
       for (const c of fetchedAll) {
