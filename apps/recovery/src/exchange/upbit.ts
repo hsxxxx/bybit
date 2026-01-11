@@ -1,15 +1,21 @@
 // apps/recovery/src/exchange/upbit.ts
 import type { Candle, Tf } from "../types.js";
-import { floorToTfSec, TF_SEC, toUpbitMinutes } from "../timeframes.js";
+import { floorToTfSec, toUpbitMinutes } from "../timeframes.js";
+
+export type FetchResult = {
+  candles: Candle[];
+  empty: boolean; // ✅ 첫 페이지부터 []이면 true (해당 to에서 과거 캔들이 없음)
+};
 
 type Params = {
   baseUrl: string;
   market: string;
   tf: Tf;
-  startSec: number; // inclusive
-  endSec: number;   // exclusive
+  startSec: number;
+  endSec: number;
   sleepMs: number;
   minIntervalMs: number;
+  debug?: boolean;
 };
 
 function sleep(ms: number) {
@@ -48,10 +54,7 @@ class RateLimiter {
     this.nextAllowed = Date.now() + this.minIntervalMs;
   }
 }
-
-// 프로세스 전역 limiter (Upbit 429 방지)
 let limiter: RateLimiter | null = null;
-
 function getLimiter(minIntervalMs: number) {
   if (!limiter) limiter = new RateLimiter(minIntervalMs);
   return limiter;
@@ -66,7 +69,7 @@ function parseRetryAfterMs(res: Response): number | null {
   return null;
 }
 
-async function fetchJsonWithRetry(url: string, maxRetry: number, baseSleepMs: number, minIntervalMs: number) {
+async function fetchJsonWithRetry(url: string, maxRetry: number, baseSleepMs: number, minIntervalMs: number, debug?: boolean) {
   let lastErr: any = null;
   const lim = getLimiter(minIntervalMs);
 
@@ -99,7 +102,12 @@ async function fetchJsonWithRetry(url: string, maxRetry: number, baseSleepMs: nu
         throw new Error(`[upbit] http ${res.status} ${res.statusText} body=${body.slice(0, 300)}`);
       }
 
-      return await res.json();
+      const json = await res.json();
+      if (debug) {
+        const len = Array.isArray(json) ? json.length : -1;
+        console.log(`[dbg] upbit ok url=${url} arrLen=${len}`);
+      }
+      return json;
     } catch (e) {
       lastErr = e;
       const backoff = Math.min(60_000, Math.max(800, baseSleepMs) * Math.pow(2, i)) + jitter(250);
@@ -110,8 +118,8 @@ async function fetchJsonWithRetry(url: string, maxRetry: number, baseSleepMs: nu
   throw lastErr ?? new Error("[upbit] failed");
 }
 
-export async function fetchUpbitCandlesRange(p: Params): Promise<Candle[]> {
-  if (!(p.startSec < p.endSec)) return [];
+export async function fetchUpbitCandlesRange(p: Params): Promise<FetchResult> {
+  if (!(p.startSec < p.endSec)) return { candles: [], empty: true };
 
   const limit = 200;
   const maxRetry = 8;
@@ -122,19 +130,25 @@ export async function fetchUpbitCandlesRange(p: Params): Promise<Candle[]> {
       : `${p.baseUrl}/v1/candles/minutes/${toUpbitMinutes(p.tf)}`;
 
   const out: Candle[] = [];
-  let cursorToSec = p.endSec; // exclusive
+  let cursorToSec = p.endSec;
+  let firstPage = true;
+  let firstPageEmpty = false;
 
   while (true) {
     const toStr = fmtUpbitToUTC(Math.max(p.startSec, cursorToSec) - 1);
-
     const url =
       `${endpoint}?market=${encodeURIComponent(p.market)}` +
       `&count=${limit}` +
       `&to=${encodeURIComponent(toStr)}`;
 
-    const arr = await fetchJsonWithRetry(url, maxRetry, p.sleepMs, p.minIntervalMs);
+    const arr = await fetchJsonWithRetry(url, maxRetry, p.sleepMs, p.minIntervalMs, p.debug);
 
-    if (!Array.isArray(arr) || arr.length === 0) break;
+    if (!Array.isArray(arr) || arr.length === 0) {
+      if (firstPage) firstPageEmpty = true;
+      break;
+    }
+
+    firstPage = false;
 
     let oldestOpenSec: number | null = null;
 
@@ -169,10 +183,7 @@ export async function fetchUpbitCandlesRange(p: Params): Promise<Candle[]> {
 
     cursorToSec = oldestOpenSec;
 
-    // 정상 요청 페이싱
     if (p.sleepMs > 0) await sleep(p.sleepMs + jitter(120));
-
-    // safety
     if (out.length > 2_000_000) break;
   }
 
@@ -184,5 +195,6 @@ export async function fetchUpbitCandlesRange(p: Params): Promise<Candle[]> {
     prev = c.time;
     uniq.push(c);
   }
-  return uniq;
+
+  return { candles: uniq, empty: firstPageEmpty };
 }

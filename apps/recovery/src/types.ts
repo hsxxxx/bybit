@@ -15,26 +15,27 @@ export type Candle = {
 export type IndicatorRow = {
   market: string;
   tf: Tf;
-  time: number; // unix seconds (open time)
-  // --- core indicators (extend freely) ---
+  time: number;
   bb_mid_20?: number | null;
   bb_upper_20_2?: number | null;
   bb_lower_20_2?: number | null;
-
   rsi_14?: number | null;
   stoch_rsi_k_14?: number | null;
   stoch_rsi_d_14?: number | null;
-
   obv?: number | null;
   pvt?: number | null;
-
-  // optional MAs (if you want)
   ma_10?: number | null;
   ma_20?: number | null;
   ma_60?: number | null;
 };
 
 export type RecoveryTask = "candle" | "indicator" | "both";
+
+// ✅ no-trade 처리 모드
+// - "skip": 빈 캔들([])인 range는 이번 실행에서만 스킵 (다음번엔 다시 시도 가능)
+// - "mark": 빈 캔들([])인 range의 슬롯들을 'no-trade'로 메모리에 기록해 missing에서 제외
+// - "mark_db": 'no-trade'를 DB 테이블에 영구 기록 (추천)
+export type NoTradeMode = "skip" | "mark" | "mark_db";
 
 export type RecoveryConfig = {
   task: RecoveryTask;
@@ -45,16 +46,18 @@ export type RecoveryConfig = {
   startSec: number; // inclusive
   endSec: number;   // exclusive
 
-  // candle missing guard
   maxMissingPerMarket: number;
 
-  // REST pacing (Upbit 429 대응)
   restConcurrency: number;
   restSleepMs: number;
   upbitMinIntervalMs: number;
 
-  // indicator warmup/lookback
-  indicatorLookbackBars: number; // max window bars (ex: 600)
+  indicatorLookbackBars: number;
+
+  // ✅ 빈 캔들([]) 처리
+  noTradeMode: NoTradeMode;
+  // range가 []이면 그 range 전체 슬롯을 no-trade로 처리할지(기본 true)
+  noTradeMarkWholeRange: boolean;
 
   db: {
     host: string;

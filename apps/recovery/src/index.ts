@@ -3,7 +3,7 @@ import "dotenv/config";
 
 import { runRecovery } from "./recovery.js";
 import { createMaria } from "./db/mariadb.js";
-import type { RecoveryConfig, Tf, RecoveryTask } from "./types.js";
+import type { RecoveryConfig, Tf, RecoveryTask, NoTradeMode } from "./types.js";
 
 function must(v: string | undefined, name: string): string {
   if (!v) throw new Error(`Missing env ${name}`);
@@ -20,7 +20,7 @@ function parseTfCsv(v: string | undefined): Tf[] {
 }
 
 function parseDateOrSec(v: string): number {
-  if (/^\d{10}$/.test(v)) return Number(v); // epoch sec
+  if (/^\d{10}$/.test(v)) return Number(v);
 
   if (/^\d{4}-\d{2}-\d{2}$/.test(v)) {
     const [y, m, d] = v.split("-").map(Number);
@@ -59,7 +59,6 @@ async function main() {
     name: must(process.env.DB_NAME, "DB_NAME")
   };
 
-  // DB 연결 후 ALL 확장
   const maria = await createMaria(dbConfig);
 
   try {
@@ -77,13 +76,11 @@ async function main() {
     const endMarginSec = Number(process.env.END_MARGIN_SEC ?? "0");
     const safeEndSec = Math.max(startSec + 1, endSec - endMarginSec);
 
-    if (!(startSec < safeEndSec)) {
-      throw new Error(`Invalid safe range startSec=${startSec} endSec=${endSec} safeEndSec=${safeEndSec}`);
-    }
+    const noTradeMode = (process.env.NO_TRADE_MODE ?? "mark_db") as NoTradeMode;
+    const noTradeMarkWholeRange = (process.env.NO_TRADE_MARK_WHOLE_RANGE ?? "1") !== "0";
 
     const cfg: RecoveryConfig = {
       task,
-
       markets,
       tfs,
 
@@ -92,20 +89,20 @@ async function main() {
 
       maxMissingPerMarket: Number(process.env.MAX_MISSING_PER_MARKET ?? "5000"),
       restConcurrency: Number(process.env.REST_CONCURRENCY ?? "1"),
-      restSleepMs: Number(process.env.REST_SLEEP_MS ?? "800"),
-      upbitMinIntervalMs: Number(process.env.UPBIT_MIN_INTERVAL_MS ?? "800"),
+      restSleepMs: Number(process.env.REST_SLEEP_MS ?? "1200"),
+      upbitMinIntervalMs: Number(process.env.UPBIT_MIN_INTERVAL_MS ?? "1200"),
 
       indicatorLookbackBars: Number(process.env.INDICATOR_LOOKBACK_BARS ?? "600"),
 
-      db: dbConfig,
+      noTradeMode,
+      noTradeMarkWholeRange,
 
-      upbit: {
-        baseUrl: process.env.UPBIT_REST_BASE ?? "https://api.upbit.com"
-      }
+      db: dbConfig,
+      upbit: { baseUrl: process.env.UPBIT_REST_BASE ?? "https://api.upbit.com" }
     };
 
     console.log(
-      `[recovery] task=${cfg.task} range start=${cfg.startSec} end=${endSec} safeEnd=${cfg.endSec} (END_MARGIN_SEC=${endMarginSec}) markets=${cfg.markets.length} tfs=${cfg.tfs.length}`
+      `[recovery] task=${cfg.task} range start=${cfg.startSec} end=${endSec} safeEnd=${cfg.endSec} markets=${cfg.markets.length} tfs=${cfg.tfs.length} noTradeMode=${cfg.noTradeMode}`
     );
 
     await runRecovery(cfg);

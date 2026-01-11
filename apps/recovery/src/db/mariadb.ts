@@ -1,4 +1,4 @@
-// apps/recovery/src/db/mariadb.ts  (JSON indicators 스키마에 맞춘 전체)
+// apps/recovery/src/db/mariadb.ts
 import mysql from "mysql2/promise";
 import type { Candle, Tf, IndicatorRow } from "../types.js";
 
@@ -11,6 +11,11 @@ export type Maria = {
 
   getExistingIndicatorTimes(params: { market: string; tf: Tf; startSec: number; endSec: number; }): Promise<Set<number>>;
   upsertIndicators(rows: IndicatorRow[]): Promise<void>;
+
+  // ✅ no-trade 영구 마킹 (옵션)
+  ensureNoTradeTable(): Promise<void>;
+  upsertNoTradeSlots(params: { market: string; tf: Tf; times: number[] }): Promise<void>;
+  getNoTradeTimes(params: { market: string; tf: Tf; startSec: number; endSec: number; }): Promise<Set<number>>;
 
   getAllMarkets(): Promise<string[]>;
   getAllTfs(): Promise<Tf[]>;
@@ -112,7 +117,7 @@ export async function createMaria(params: {
     return set;
   }
 
-  // ✅ JSON 스키마: indicators 컬럼에 row 전체(키 제외)를 넣는다
+  // ✅ indicators JSON 컬럼 저장
   async function upsertIndicators(rows: IndicatorRow[]) {
     if (rows.length === 0) return;
 
@@ -126,18 +131,63 @@ export async function createMaria(params: {
 
     const values = rows.map(r => {
       const { market, tf, time, ...rest } = r as any;
-
-      // indicators JSON에는 숫자/null만 들어가게 정리
       const indicators: Record<string, any> = {};
       for (const [k, v] of Object.entries(rest)) {
         if (v === undefined) continue;
         indicators[k] = v;
       }
-
       return [market, tf, time, JSON.stringify(indicators)];
     });
 
     await pool.query(sql, [values]);
+  }
+
+  // ---- no-trade table (optional) ----
+  async function ensureNoTradeTable() {
+    // 존재하면 아무것도 안 함
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS upbit_no_trade (
+        market VARCHAR(32) NOT NULL,
+        tf     VARCHAR(8)  NOT NULL,
+        time   BIGINT      NOT NULL,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (market, tf, time),
+        INDEX idx_tf_time (tf, time),
+        INDEX idx_market_time (market, time)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+  }
+
+  async function upsertNoTradeSlots(p: { market: string; tf: Tf; times: number[] }) {
+    if (p.times.length === 0) return;
+    await ensureNoTradeTable();
+    const sql = `
+      INSERT INTO upbit_no_trade (market, tf, time)
+      VALUES ?
+      ON DUPLICATE KEY UPDATE time = VALUES(time)
+    `;
+    const values = p.times.map(t => [p.market, p.tf, t]);
+    await pool.query(sql, [values]);
+  }
+
+  async function getNoTradeTimes(p: { market: string; tf: Tf; startSec: number; endSec: number; }): Promise<Set<number>> {
+    // 테이블이 없으면 빈 set
+    try {
+      const sql = `
+        SELECT time
+        FROM upbit_no_trade
+        WHERE market = ?
+          AND tf = ?
+          AND time >= ?
+          AND time < ?
+      `;
+      const [rows] = await pool.query(sql, [p.market, p.tf, p.startSec, p.endSec]);
+      const set = new Set<number>();
+      for (const r of rows as any[]) set.add(Number(r.time));
+      return set;
+    } catch {
+      return new Set<number>();
+    }
   }
 
   async function getAllMarkets(): Promise<string[]> {
@@ -157,6 +207,9 @@ export async function createMaria(params: {
     getCandles,
     getExistingIndicatorTimes,
     upsertIndicators,
+    ensureNoTradeTable,
+    upsertNoTradeSlots,
+    getNoTradeTimes,
     getAllMarkets,
     getAllTfs
   };
