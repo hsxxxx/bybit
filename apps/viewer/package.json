@@ -2,32 +2,26 @@
   "name": "@bits/viewer",
   "version": "1.0.0",
   "private": true,
+  "main": "dist/index.js",
+  "type": "module",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build && tsc -p tsconfig.build.json",
-    "start": "next start -p 3000",
-    "ws": "tsx scripts/viewer-ws.ts",
-    "proxy": "tsx scripts/reverse-proxy.ts",
-    "lint": "next lint"
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js"
   },
   "dependencies": {
-    "dotenv": "^17.2.3",
-    "eslint": "^9.39.2",
-    "eslint-config-next": "^16.1.1",
-    "http-proxy": "^1.18.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
     "kafkajs": "^2.2.4",
-    "lightweight-charts": "^5.0.0",
-    "next": "^14.2.35",
-    "react": "18.2.0",
-    "react-dom": "18.2.0",
-    "ws": "^8.19.0"
+    "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@types/node": "^20.11.0",
-    "@types/react": "^18.2.45",
-    "@types/react-dom": "^18.2.18",
-    "ts-node": "^10.9.2",
-    "tsx": "^4.21.0",
-    "typescript": "^5.3.3"
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.10",
+    "@types/ws": "^8.5.12",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
   }
 }
