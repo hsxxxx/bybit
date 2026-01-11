@@ -1,8 +1,6 @@
 import type { Timeframe } from "../types";
 
 export function parseKstToEpochSeconds(kst: string): number {
-  // Upbit kst: "YYYY-MM-DDTHH:mm:ss"
-  // 반드시 +09:00 붙여서 파싱
   const iso = kst.includes("+") ? kst : `${kst}+09:00`;
   const ms = Date.parse(iso);
   if (!Number.isFinite(ms)) throw new Error(`Invalid KST datetime: ${kst}`);
@@ -10,7 +8,6 @@ export function parseKstToEpochSeconds(kst: string): number {
 }
 
 export function parseKstTextToEpochSeconds(kstText: string): number {
-  // "YYYY-MM-DD HH:mm:ss" -> "YYYY-MM-DDTHH:mm:ss"
   const norm = kstText.trim().replace(" ", "T");
   return parseKstToEpochSeconds(norm);
 }
@@ -27,29 +24,32 @@ export function tfToMinutes(tf: Timeframe): number {
       return 60;
     case "4h":
       return 240;
-    default: {
-      const _exhaustive: never = tf;
-      return _exhaustive;
-    }
   }
 }
 
-export function minutesToSeconds(m: number): number {
-  return m * 60;
-}
-
 export function tfStepSeconds(tf: Timeframe): number {
-  return minutesToSeconds(tfToMinutes(tf));
+  return tfToMinutes(tf) * 60;
 }
 
-export function kstIsoFromEpochSeconds(epochSec: number): string {
-  // epoch -> KST ISO (to param 용)
-  const d = new Date((epochSec + 9 * 3600) * 1000); // shift to KST for formatting
-  const yyyy = d.getUTCFullYear();
-  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(d.getUTCDate()).padStart(2, "0");
-  const hh = String(d.getUTCHours()).padStart(2, "0");
-  const mi = String(d.getUTCMinutes()).padStart(2, "0");
-  const ss = String(d.getUTCSeconds()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}`; // KST local time string (no offset)
+/**
+ * Upbit candles "to"는 safest가 UTC ISO(Z)임
+ * epoch seconds -> "YYYY-MM-DDTHH:mm:ssZ"
+ */
+export function utcIsoFromEpochSeconds(epochSec: number): string {
+  return new Date(epochSec * 1000).toISOString().replace(".000Z", "Z");
+}
+
+/**
+ * 디버깅용: epoch -> KST ISO(+09:00)
+ */
+export function kstIsoWithOffsetFromEpochSeconds(epochSec: number): string {
+  const d = new Date(epochSec * 1000);
+  const kst = new Date(d.getTime() + 9 * 3600 * 1000);
+  const yyyy = kst.getUTCFullYear();
+  const mm = String(kst.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(kst.getUTCDate()).padStart(2, "0");
+  const hh = String(kst.getUTCHours()).padStart(2, "0");
+  const mi = String(kst.getUTCMinutes()).padStart(2, "0");
+  const ss = String(kst.getUTCSeconds()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}+09:00`;
 }
