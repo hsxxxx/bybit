@@ -15,21 +15,25 @@ type UpbitCandleRow = {
 export async function fetchUpbitCandlesRange(params: {
   baseUrl: string;
   market: string;
-  tf: Tf;           // upbit minutes supported only
-  startSec: number; // inclusive
-  endSec: number;   // exclusive
-  sleepMs: number;  // base throttle between pages
+  tf: Tf;
+  startSec: number;
+  endSec: number;
+  sleepMs: number;
   signal?: AbortSignal;
 
-  // retry config (optional)
-  maxRetries?: number;      // default 8
-  retryBaseDelayMs?: number; // default 400
+  // retry config
+  maxRetries?: number;          // default 20
+  retryBaseDelayMs?: number;    // default 800
+  retryMinDelayMs?: number;     // default 1500 (429 최소 대기)
+  retryMaxDelayMs?: number;     // default 60000
 }): Promise<Candle[]> {
   const unit = toUpbitMinutes(params.tf);
   const step = TF_SEC[params.tf];
 
-  const maxRetries = params.maxRetries ?? 8;
-  const retryBaseDelayMs = params.retryBaseDelayMs ?? 400;
+  const maxRetries = params.maxRetries ?? 20;
+  const retryBaseDelayMs = params.retryBaseDelayMs ?? 800;
+  const retryMinDelayMs = params.retryMinDelayMs ?? 1500;
+  const retryMaxDelayMs = params.retryMaxDelayMs ?? 60_000;
 
   const out: Candle[] = [];
   let cursorSec = params.endSec;
@@ -45,7 +49,9 @@ export async function fetchUpbitCandlesRange(params: {
       url.toString(),
       params.signal,
       maxRetries,
-      retryBaseDelayMs
+      retryBaseDelayMs,
+      retryMinDelayMs,
+      retryMaxDelayMs
     );
 
     if (!Array.isArray(rows) || rows.length === 0) break;
@@ -90,7 +96,9 @@ async function fetchJsonWithRetry<T>(
   url: string,
   signal: AbortSignal | undefined,
   maxRetries: number,
-  baseDelayMs: number
+  baseDelayMs: number,
+  minDelayMs: number,
+  maxDelayMs: number
 ): Promise<T> {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const res = await fetch(url, { method: "GET", signal });
@@ -100,26 +108,23 @@ async function fetchJsonWithRetry<T>(
     const txt = await res.text().catch(() => "");
     const retryAfter = parseRetryAfterMs(res);
 
-    // 429/5xx 는 재시도
-    if (res.status === 429 || (res.status >= 500 && res.status <= 599)) {
-      if (attempt === maxRetries) {
-        throw new Error(`Upbit fetch failed ${res.status} ${res.statusText} ${txt}`.trim());
-      }
-
-      const backoff = Math.min(
-        30_000,
-        retryAfter ?? jitter(baseDelayMs * Math.pow(2, attempt))
-      );
-
-      await sleep(backoff);
-      continue;
+    const isRetryable = res.status === 429 || (res.status >= 500 && res.status <= 599);
+    if (!isRetryable) {
+      throw new Error(`Upbit fetch failed ${res.status} ${res.statusText} ${txt}`.trim());
     }
 
-    // 그 외는 즉시 실패
-    throw new Error(`Upbit fetch failed ${res.status} ${res.statusText} ${txt}`.trim());
+    if (attempt === maxRetries) {
+      throw new Error(`Upbit fetch failed ${res.status} ${res.statusText} ${txt}`.trim());
+    }
+
+    // 429일 때는 최소 대기(minDelayMs) 보장 + Retry-After 있으면 우선
+    const exp = baseDelayMs * Math.pow(2, attempt);
+    const candidate = retryAfter ?? jitter(exp);
+
+    const backoff = clamp(Math.max(minDelayMs, candidate), minDelayMs, maxDelayMs);
+    await sleep(backoff);
   }
 
-  // unreachable
   throw new Error("fetchJsonWithRetry: unreachable");
 }
 
@@ -127,10 +132,8 @@ function parseRetryAfterMs(res: Response): number | undefined {
   const ra = res.headers.get("retry-after");
   if (!ra) return undefined;
 
-  // seconds format
   if (/^\d+$/.test(ra)) return Number(ra) * 1000;
 
-  // http-date format
   const t = Date.parse(ra);
   if (Number.isFinite(t)) {
     const ms = t - Date.now();
@@ -142,6 +145,10 @@ function parseRetryAfterMs(res: Response): number | undefined {
 function jitter(ms: number): number {
   const r = 0.7 + Math.random() * 0.6; // 0.7~1.3
   return Math.floor(ms * r);
+}
+
+function clamp(v: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, v));
 }
 
 function parseUpbitUtcSec(s: string): number {
