@@ -6,7 +6,6 @@ import { parseKstToEpochSeconds, tfStepSeconds, kstIsoFromEpochSeconds } from ".
 import { upsertCandles } from "../db";
 
 function toCandleRow(market: string, tf: Timeframe, c: any): CandleRow {
-  // KST 기준 open time -> epoch seconds
   const openSec = parseKstToEpochSeconds(c.candle_date_time_kst);
   return {
     market,
@@ -33,25 +32,26 @@ export async function recoverCandlesForMarketTf(params: {
   let total = 0;
   const step = tfStepSeconds(tf);
 
-  // Upbit API는 최신→과거 순으로 내려줌. to=해당시각 "이전" 캔들 포함.
+  let loop = 0;
+
   while (true) {
+    loop += 1;
+
     const toIso = kstIsoFromEpochSeconds(cursorToSec);
-    let candles;
-    try {
-      candles = await fetchCandlesChunk({
-        market,
-        tf,
-        toKstIso: toIso,
-        count: 200
-      });
-    } catch (e: any) {
-      // 429는 간단 backoff
-      if (String(e?.message || "").includes("429")) {
-        await new Promise((r) => setTimeout(r, 1200));
-        continue;
-      }
-      throw e;
+
+    // 시작 로그(가끔만)
+    if (loop === 1 || loop % 10 === 0) {
+      log.info(`[candles] ${market} ${tf} fetching...`, { toIso, cursorToSec });
     }
+
+    const candles = await fetchCandlesChunk({
+      market,
+      tf,
+      toKstIso: toIso,
+      count: 200,
+      timeoutMs: 10_000,
+      maxRetry: 10
+    });
 
     if (!candles || candles.length === 0) break;
 
@@ -59,16 +59,14 @@ export async function recoverCandlesForMarketTf(params: {
       .map((c) => toCandleRow(market, tf, c))
       .filter((r) => r.time >= startSec && r.time <= endSec);
 
-    await upsertCandles(pool, rows);
+    await upsertCandles(params.pool, rows);
     total += rows.length;
 
-    // 가장 오래된 캔들로 cursor 이동
     const oldest = candles[candles.length - 1];
     const oldestSec = parseKstToEpochSeconds(oldest.candle_date_time_kst);
 
     if (oldestSec <= startSec) break;
 
-    // 다음 요청은 oldest - step 로 이동 (중복 최소화)
     cursorToSec = oldestSec - step;
   }
 

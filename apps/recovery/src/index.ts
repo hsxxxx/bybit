@@ -10,6 +10,7 @@ import { rebuildIndicatorsForMarketTf } from "./steps/rebuildIndicators";
 
 async function main() {
   const cfg = loadConfig();
+
   log.info("recovery start", {
     tfList: cfg.tfList,
     marketFilter: cfg.marketFilter,
@@ -24,17 +25,24 @@ async function main() {
 
   const markets = await fetchMarkets(cfg.marketFilter);
   if (markets.length === 0) throw new Error("No markets found");
-
   log.info(`markets loaded: ${markets.length}`);
+
+  // 진행 heartbeat (멈춘 것처럼 보이는 문제 방지)
+  let doneCount = 0;
+  const totalJobs = markets.length * cfg.tfList.length;
+  const hb = setInterval(() => {
+    log.info(`[progress] ${doneCount}/${totalJobs} jobs done`);
+  }, 15_000);
 
   const limit = pLimit(cfg.concurrency);
 
-  const tasks: Array<Promise<any>> = [];
+  const tasks: Array<Promise<void>> = [];
   for (const market of markets) {
     for (const tf of cfg.tfList) {
       tasks.push(
         limit(async () => {
           const t0 = Date.now();
+          log.info(`[start] ${market} ${tf}`);
 
           if (cfg.mode === "candles" || cfg.mode === "all") {
             await recoverCandlesForMarketTf({
@@ -58,15 +66,16 @@ async function main() {
           }
 
           const ms = Date.now() - t0;
+          doneCount += 1;
           log.info(`[done] ${market} ${tf} ${ms}ms`);
         })
       );
     }
   }
 
-  // fail-fast
   await Promise.all(tasks);
 
+  clearInterval(hb);
   await pool.end();
   log.info("recovery finished");
 }
