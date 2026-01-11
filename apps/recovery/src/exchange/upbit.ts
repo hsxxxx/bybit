@@ -1,215 +1,151 @@
-// apps/recovery/src/exchange/upbit.ts
-import type { Candle, Tf } from "../types.js";
-import { floorToTfSec, toUpbitMinutes, TF_SEC } from "../timeframes.js";
+// src/exchange/upbit.ts
+import { tfKeyFromSec, toKstIsoNoMs } from "../timeframes.js";
 
-export type FetchResult = {
-  candles: Candle[];
-  empty: boolean; // 첫 페이지부터 []이면 true
-};
-
-type Params = {
-  baseUrl: string;
+export type UpbitCandle = {
   market: string;
-  tf: Tf;
-  startSec: number;
-  endSec: number;
-  sleepMs: number;
-  minIntervalMs: number;
-  debug?: boolean;
+  candle_date_time_utc: string;
+  candle_date_time_kst: string;
+  opening_price: number;
+  high_price: number;
+  low_price: number;
+  trade_price: number;
+  timestamp: number; // ms
+  candle_acc_trade_price: number;
+  candle_acc_trade_volume: number;
+  unit?: number;
 };
 
 function sleep(ms: number) {
-  return new Promise<void>(r => setTimeout(r, ms));
-}
-function jitter(ms: number) {
-  return Math.floor(Math.random() * ms);
+  return new Promise((r) => setTimeout(r, ms));
 }
 
-function fmtUpbitToUTC(sec: number): string {
-  const d = new Date(sec * 1000);
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(d.getUTCDate()).padStart(2, "0");
-  const hh = String(d.getUTCHours()).padStart(2, "0");
-  const mm = String(d.getUTCMinutes()).padStart(2, "0");
-  const ss = String(d.getUTCSeconds()).padStart(2, "0");
-  return `${y}-${m}-${dd}T${hh}:${mm}:${ss}`;
-}
+async function fetchJson<T>(url: string, init?: RequestInit, retry = 5): Promise<T> {
+  let lastErr: unknown = null;
 
-function parseOpenSecFromUpbit(item: any, tf: Tf): number | null {
-  const s = item?.candle_date_time_utc;
-  if (typeof s !== "string") return null;
-
-  const t = Date.parse(s.endsWith("Z") ? s : `${s}Z`);
-  if (!Number.isFinite(t)) return null;
-
-  return floorToTfSec(Math.floor(t / 1000), tf);
-}
-
-class RateLimiter {
-  private nextAllowed = 0;
-  constructor(private minIntervalMs: number) {}
-  async waitTurn() {
-    const now = Date.now();
-    const wait = Math.max(0, this.nextAllowed - now);
-    if (wait > 0) await sleep(wait);
-    this.nextAllowed = Date.now() + this.minIntervalMs;
-  }
-}
-let limiter: RateLimiter | null = null;
-function getLimiter(minIntervalMs: number) {
-  if (!limiter) limiter = new RateLimiter(minIntervalMs);
-  return limiter;
-}
-
-function parseRetryAfterMs(res: Response): number | null {
-  const ra = res.headers.get("retry-after");
-  if (!ra) return null;
-  const sec = Number(ra);
-  if (!Number.isFinite(sec) || sec < 0) return null;
-  return Math.ceil(sec * 1000);
-}
-
-async function fetchJsonWithRetry(url: string, maxRetry: number, baseSleepMs: number, minIntervalMs: number, debug?: boolean) {
-  let lastErr: any = null;
-  const lim = getLimiter(minIntervalMs);
-
-  for (let i = 0; i <= maxRetry; i++) {
-    await lim.waitTurn();
-
+  for (let i = 0; i < retry; i++) {
     try {
-      const res = await fetch(url, { method: "GET", headers: { accept: "application/json" } });
+      const res = await fetch(url, {
+        ...init,
+        headers: {
+          accept: "application/json",
+          ...(init?.headers ?? {}),
+        },
+      });
 
+      // Upbit: 429 가끔 뜸
       if (res.status === 429) {
-        const body = await res.text().catch(() => "");
-        const raMs = parseRetryAfterMs(res);
-        const backoff = Math.min(60_000, Math.max(800, baseSleepMs) * Math.pow(2, i));
-        const waitMs = (raMs ?? backoff) + jitter(250);
-        console.warn(`[upbit] 429 try=${i + 1}/${maxRetry + 1} waitMs=${waitMs} url=${url} body=${body.slice(0, 120)}`);
-        await sleep(waitMs);
-        continue;
-      }
-
-      if (res.status >= 500 && res.status <= 599) {
-        const body = await res.text().catch(() => "");
-        const backoff = Math.min(60_000, Math.max(800, baseSleepMs) * Math.pow(2, i)) + jitter(250);
-        console.warn(`[upbit] ${res.status} try=${i + 1}/${maxRetry + 1} waitMs=${backoff} url=${url} body=${body.slice(0, 120)}`);
-        await sleep(backoff);
+        const wait = 250 + i * 500;
+        await sleep(wait);
         continue;
       }
 
       if (!res.ok) {
-        const body = await res.text().catch(() => "");
-        throw new Error(`[upbit] http ${res.status} ${res.statusText} body=${body.slice(0, 300)}`);
+        const text = await res.text().catch(() => "");
+        throw new Error(`HTTP ${res.status} ${res.statusText} :: ${text}`);
       }
 
-      const json = await res.json();
-      if (debug) {
-        const len = Array.isArray(json) ? json.length : -1;
-        console.log(`[dbg] upbit ok url=${url} arrLen=${len}`);
-      }
-      return json;
+      return (await res.json()) as T;
     } catch (e) {
       lastErr = e;
-      const backoff = Math.min(60_000, Math.max(800, baseSleepMs) * Math.pow(2, i)) + jitter(250);
-      console.warn(`[upbit] fetch err try=${i + 1}/${maxRetry + 1} waitMs=${backoff} url=${url} err=${String(e).slice(0, 200)}`);
-      await sleep(backoff);
+      const wait = 250 + i * 500;
+      await sleep(wait);
     }
   }
 
-  throw lastErr ?? new Error("[upbit] failed");
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
-export async function fetchUpbitCandlesRange(p: Params): Promise<FetchResult> {
-  if (!(p.startSec < p.endSec)) return { candles: [], empty: true };
+function upbitMinutesUnitFromTfSec(tfSec: number): number {
+  const tfKey = tfKeyFromSec(tfSec);
+  switch (tfKey) {
+    case "1m":
+      return 1;
+    case "3m":
+      return 3;
+    case "5m":
+      return 5;
+    case "10m":
+      return 10;
+    case "15m":
+      return 15;
+    case "30m":
+      return 30;
+    case "1h":
+      return 60;
+    case "4h":
+      return 240;
+    default:
+      throw new Error(`Unsupported tfKey=${tfKey}`);
+  }
+}
 
-  const step = TF_SEC[p.tf];
-  const limit = 200;
-  const maxRetry = 8;
+/**
+ * Upbit minute candles range fetcher (KST 기준으로 to 파라미터를 내림차순 페이징에 사용)
+ *
+ * @param market ex) "KRW-BTC"
+ * @param tfSec ex) 60, 300, 900 ...
+ * @param fromMs inclusive (epoch ms, KST 기준으로 해석)
+ * @param toMs exclusive (epoch ms)
+ * @param limitPerReq max 200
+ */
+export async function fetchUpbitCandlesRange(params: {
+  market: string;
+  tfSec: number;
+  fromMs: number;
+  toMs: number;
+  limitPerReq?: number;
+  throttleMs?: number;
+}): Promise<UpbitCandle[]> {
+  const { market, tfSec, fromMs, toMs } = params;
+  const limit = Math.min(Math.max(params.limitPerReq ?? 200, 1), 200);
+  const throttleMs = Math.max(params.throttleMs ?? 120, 0);
 
-  const endpoint =
-    p.tf === "1d"
-      ? `${p.baseUrl}/v1/candles/days`
-      : `${p.baseUrl}/v1/candles/minutes/${toUpbitMinutes(p.tf)}`;
+  const unit = upbitMinutesUnitFromTfSec(tfSec);
 
-  const out: Candle[] = [];
-  let cursorToSec = p.endSec;
-  let firstPage = true;
-  let firstPageEmpty = false;
+  // Upbit API는 `to` 기준으로 과거로 내려가며(내림차순) 최대 count개 반환
+  // 우리가 원하는 건 [fromMs, toMs) 구간
+  let cursorToMs = toMs;
+  const out: UpbitCandle[] = [];
 
   while (true) {
-    // ✅ 핵심: endSec 슬롯 포함 위해 +step-1
-    const toStr = fmtUpbitToUTC(Math.max(p.startSec, cursorToSec + step) - 1);
-
+    const toIsoKst = toKstIsoNoMs(cursorToMs - 1); // exclusive -> inclusive 느낌으로 한 틱 빼서 안전
     const url =
-      `${endpoint}?market=${encodeURIComponent(p.market)}` +
-      `&count=${limit}` +
-      `&to=${encodeURIComponent(toStr)}`;
+      `https://api.upbit.com/v1/candles/minutes/${unit}` +
+      `?market=${encodeURIComponent(market)}` +
+      `&to=${encodeURIComponent(toIsoKst)}` +
+      `&count=${limit}`;
 
-    const arr = await fetchJsonWithRetry(url, maxRetry, p.sleepMs, p.minIntervalMs, p.debug);
+    const rows = await fetchJson<UpbitCandle[]>(url);
 
-    if (!Array.isArray(arr) || arr.length === 0) {
-      if (firstPage) firstPageEmpty = true;
-      break;
+    if (!rows || rows.length === 0) break;
+
+    // rows는 최신 -> 과거(내림차순)
+    for (const r of rows) {
+      const t = r.timestamp; // ms, KST close time 기반으로 들어옴(Upbit candle timestamp)
+      if (t >= fromMs && t < toMs) out.push(r);
     }
 
-    if (p.debug && firstPage) {
-      const s0 = arr[0]?.candle_date_time_utc;
-      const o0 = parseOpenSecFromUpbit(arr[0], p.tf);
-      const sL = arr[arr.length - 1]?.candle_date_time_utc;
-      const oL = parseOpenSecFromUpbit(arr[arr.length - 1], p.tf);
-      console.log(
-        `[dbg] upbit sample market=${p.market} tf=${p.tf} utc0=${s0} open0=${o0} utclast=${sL} openLast=${oL} want=[${p.startSec},${p.endSec})`
-      );
-    }
-    firstPage = false;
+    // 페이징: 가장 오래된 캔들의 timestamp로 커서를 이동
+    const oldest = rows[rows.length - 1];
+    const nextTo = oldest.timestamp;
+    if (!Number.isFinite(nextTo)) break;
 
-    let oldestOpenSec: number | null = null;
+    // 더 내려가도 fromMs보다 과거면 종료
+    if (nextTo <= fromMs) break;
 
-    for (const item of arr) {
-      const openSec = parseOpenSecFromUpbit(item, p.tf);
-      if (openSec == null) continue;
+    // 다음 요청은 oldest 보다 더 과거로
+    cursorToMs = nextTo;
 
-      oldestOpenSec = oldestOpenSec == null ? openSec : Math.min(oldestOpenSec, openSec);
+    if (throttleMs > 0) await sleep(throttleMs);
 
-      if (openSec < p.startSec) continue;
-      if (openSec >= p.endSec) continue;
-
-      const c: Candle = {
-        market: p.market,
-        tf: p.tf,
-        time: openSec,
-        open: Number(item.opening_price),
-        high: Number(item.high_price),
-        low: Number(item.low_price),
-        close: Number(item.trade_price),
-        volume: Number(item.candle_acc_trade_volume)
-      };
-
-      if (!Number.isFinite(c.open) || !Number.isFinite(c.high) || !Number.isFinite(c.low) || !Number.isFinite(c.close) || !Number.isFinite(c.volume)) {
-        continue;
-      }
-
-      out.push(c);
-    }
-
-    if (oldestOpenSec == null) break;
-    if (oldestOpenSec <= p.startSec) break;
-
-    cursorToSec = oldestOpenSec;
-
-    if (p.sleepMs > 0) await sleep(p.sleepMs + jitter(120));
-    if (out.length > 2_000_000) break;
+    // 안전장치: 같은 timestamp로 무한루프 방지
+    if (rows.length === 1 && cursorToMs === toMs) break;
   }
 
-  out.sort((a, b) => a.time - b.time);
-  const uniq: Candle[] = [];
-  let prev = -1;
+  // 중복 제거 + 오름차순 정렬 (timestamp 기준)
+  const map = new Map<number, UpbitCandle>();
   for (const c of out) {
-    if (c.time === prev) continue;
-    prev = c.time;
-    uniq.push(c);
+    map.set(c.timestamp, c);
   }
-
-  return { candles: uniq, empty: firstPageEmpty };
+  return Array.from(map.values()).sort((a, b) => a.timestamp - b.timestamp);
 }

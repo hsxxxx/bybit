@@ -5,16 +5,16 @@ import type { Candle, Tf, IndicatorRow } from "../types.js";
 export type Maria = {
   close(): Promise<void>;
 
-  getExistingCandleTimes(params: { market: string; tf: Tf; startSec: number; endSec: number; }): Promise<Set<number>>;
+  getExistingCandleTimes(p: { market: string; tf: Tf; startSec: number; endSec: number }): Promise<Set<number>>;
   upsertCandles(candles: Candle[]): Promise<void>;
-  getCandles(params: { market: string; tf: Tf; startSec: number; endSec: number; }): Promise<Candle[]>;
+  getCandles(p: { market: string; tf: Tf; startSec: number; endSec: number }): Promise<Candle[]>;
 
-  getExistingIndicatorTimes(params: { market: string; tf: Tf; startSec: number; endSec: number; }): Promise<Set<number>>;
+  getExistingIndicatorTimes(p: { market: string; tf: Tf; startSec: number; endSec: number }): Promise<Set<number>>;
   upsertIndicators(rows: IndicatorRow[]): Promise<void>;
 
   ensureNoTradeTable(): Promise<void>;
-  upsertNoTradeSlots(params: { market: string; tf: Tf; times: number[] }): Promise<void>;
-  getNoTradeTimes(params: { market: string; tf: Tf; startSec: number; endSec: number; }): Promise<Set<number>>;
+  getNoTradeTimes(p: { market: string; tf: Tf; startSec: number; endSec: number }): Promise<Set<number>>;
+  upsertNoTradeSlots(p: { market: string; tf: Tf; times: number[] }): Promise<void>;
 
   getAllMarkets(): Promise<string[]>;
   getAllTfs(): Promise<Tf[]>;
@@ -41,18 +41,34 @@ export async function createMaria(params: {
     await pool.end();
   }
 
-  async function getExistingCandleTimes(p: { market: string; tf: Tf; startSec: number; endSec: number; }): Promise<Set<number>> {
+  async function getExistingCandleTimes(p: { market: string; tf: Tf; startSec: number; endSec: number }): Promise<Set<number>> {
     const [rows] = await pool.query(
       `SELECT time FROM upbit_candle WHERE market=? AND tf=? AND time>=? AND time<?`,
       [p.market, p.tf, p.startSec, p.endSec]
     );
-
     const set = new Set<number>();
     for (const r of rows as any[]) set.add(Number(r.time));
     return set;
   }
 
-  async function getCandles(p: { market: string; tf: Tf; startSec: number; endSec: number; }): Promise<Candle[]> {
+  async function upsertCandles(candles: Candle[]) {
+    if (candles.length === 0) return;
+    const sql = `
+      INSERT INTO upbit_candle
+        (market, tf, time, open, high, low, close, volume)
+      VALUES ?
+      ON DUPLICATE KEY UPDATE
+        open=VALUES(open),
+        high=VALUES(high),
+        low=VALUES(low),
+        close=VALUES(close),
+        volume=VALUES(volume)
+    `;
+    const values = candles.map(c => [c.market, c.tf, c.time, c.open, c.high, c.low, c.close, c.volume]);
+    await pool.query(sql, [values]);
+  }
+
+  async function getCandles(p: { market: string; tf: Tf; startSec: number; endSec: number }): Promise<Candle[]> {
     const [rows] = await pool.query(
       `SELECT market, tf, time, open, high, low, close, volume
        FROM upbit_candle
@@ -60,7 +76,6 @@ export async function createMaria(params: {
        ORDER BY time ASC`,
       [p.market, p.tf, p.startSec, p.endSec]
     );
-
     return (rows as any[]).map(r => ({
       market: String(r.market),
       tf: r.tf as Tf,
@@ -73,51 +88,23 @@ export async function createMaria(params: {
     }));
   }
 
-  async function upsertCandles(candles: Candle[]) {
-    if (candles.length === 0) return;
-
-    const sql = `
-      INSERT INTO upbit_candle
-        (market, tf, time, open, high, low, close, volume)
-      VALUES ?
-      ON DUPLICATE KEY UPDATE
-        open = VALUES(open),
-        high = VALUES(high),
-        low = VALUES(low),
-        close = VALUES(close),
-        volume = VALUES(volume)
-    `;
-
-    const values = candles.map(c => [
-      c.market, c.tf, c.time, c.open, c.high, c.low, c.close, c.volume
-    ]);
-
-    await pool.query(sql, [values]);
-  }
-
-  async function getExistingIndicatorTimes(p: { market: string; tf: Tf; startSec: number; endSec: number; }): Promise<Set<number>> {
+  async function getExistingIndicatorTimes(p: { market: string; tf: Tf; startSec: number; endSec: number }): Promise<Set<number>> {
     const [rows] = await pool.query(
       `SELECT time FROM upbit_indicator WHERE market=? AND tf=? AND time>=? AND time<?`,
       [p.market, p.tf, p.startSec, p.endSec]
     );
-
     const set = new Set<number>();
     for (const r of rows as any[]) set.add(Number(r.time));
     return set;
   }
 
-  // ✅ JSON 컬럼 저장
   async function upsertIndicators(rows: IndicatorRow[]) {
     if (rows.length === 0) return;
-
     const sql = `
-      INSERT INTO upbit_indicator
-        (market, tf, time, indicators)
+      INSERT INTO upbit_indicator (market, tf, time, indicators)
       VALUES ?
-      ON DUPLICATE KEY UPDATE
-        indicators = VALUES(indicators)
+      ON DUPLICATE KEY UPDATE indicators=VALUES(indicators)
     `;
-
     const values = rows.map(r => {
       const { market, tf, time, ...rest } = r as any;
       const indicators: Record<string, any> = {};
@@ -127,7 +114,6 @@ export async function createMaria(params: {
       }
       return [market, tf, time, JSON.stringify(indicators)];
     });
-
     await pool.query(sql, [values]);
   }
 
@@ -141,8 +127,18 @@ export async function createMaria(params: {
         PRIMARY KEY (market, tf, time),
         INDEX idx_tf_time (tf, time),
         INDEX idx_market_time (market, time)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
+  }
+
+  async function getNoTradeTimes(p: { market: string; tf: Tf; startSec: number; endSec: number }): Promise<Set<number>> {
+    const [rows] = await pool.query(
+      `SELECT time FROM upbit_no_trade WHERE market=? AND tf=? AND time>=? AND time<?`,
+      [p.market, p.tf, p.startSec, p.endSec]
+    );
+    const set = new Set<number>();
+    for (const r of rows as any[]) set.add(Number(r.time));
+    return set;
   }
 
   async function upsertNoTradeSlots(p: { market: string; tf: Tf; times: number[] }) {
@@ -151,24 +147,10 @@ export async function createMaria(params: {
     const sql = `
       INSERT INTO upbit_no_trade (market, tf, time)
       VALUES ?
-      ON DUPLICATE KEY UPDATE time = VALUES(time)
+      ON DUPLICATE KEY UPDATE updated_at=CURRENT_TIMESTAMP
     `;
     const values = p.times.map(t => [p.market, p.tf, t]);
     await pool.query(sql, [values]);
-  }
-
-  async function getNoTradeTimes(p: { market: string; tf: Tf; startSec: number; endSec: number; }): Promise<Set<number>> {
-    try {
-      const [rows] = await pool.query(
-        `SELECT time FROM upbit_no_trade WHERE market=? AND tf=? AND time>=? AND time<?`,
-        [p.market, p.tf, p.startSec, p.endSec]
-      );
-      const set = new Set<number>();
-      for (const r of rows as any[]) set.add(Number(r.time));
-      return set;
-    } catch {
-      return new Set<number>();
-    }
   }
 
   async function getAllMarkets(): Promise<string[]> {
@@ -189,8 +171,8 @@ export async function createMaria(params: {
     getExistingIndicatorTimes,
     upsertIndicators,
     ensureNoTradeTable,
-    upsertNoTradeSlots,
     getNoTradeTimes,
+    upsertNoTradeSlots,
     getAllMarkets,
     getAllTfs
   };

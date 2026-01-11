@@ -1,173 +1,193 @@
 // apps/recovery/src/indicators/core.ts
 import type { Candle, IndicatorRow } from "../types.js";
-import { sma, stddev, clamp } from "./math.js";
 
-export type IndicatorParams = {
-  bbPeriod: number;
-  bbStdMult: number;
-  rsiPeriod: number;
-  stochPeriod: number;
-  stochSmoothK: number;
-  stochSmoothD: number;
-  ma10: number;
-  ma20: number;
-  ma60: number;
+// 외부 라이브러리 없이 최소한만 구현 (필요한 것만)
+// - MA, RSI, StochRSI, OBV, PVT, BB(20,2), ret
+export const DEFAULT_PARAMS = {
+  bbLen: 20,
+  bbMult: 2,
+  rsiLen: 14,
+  stochLen: 14,
+  maLens: [7, 10, 20, 50, 60, 200, 400, 800],
+  version: "v1"
 };
 
-export const DEFAULT_PARAMS: IndicatorParams = {
-  bbPeriod: 20,
-  bbStdMult: 2,
-  rsiPeriod: 14,
-  stochPeriod: 14,
-  stochSmoothK: 3,
-  stochSmoothD: 3,
-  ma10: 10,
-  ma20: 20,
-  ma60: 60
-};
-
-type State = {
-  closes: number[];
-  prevClose: number | null;
-  avgGain: number | null;
-  avgLoss: number | null;
-  rsiSeries: number[];
-  stochKSeries: number[];
-  obv: number;
-  pvt: number;
-};
-
-function createState(): State {
-  return {
-    closes: [],
-    prevClose: null,
-    avgGain: null,
-    avgLoss: null,
-    rsiSeries: [],
-    stochKSeries: [],
-    obv: 0,
-    pvt: 0
-  };
+function sma(values: number[], i: number, len: number): number | null {
+  if (i + 1 < len) return null;
+  let s = 0;
+  for (let k = i - len + 1; k <= i; k++) s += values[k];
+  return s / len;
 }
 
-function updateRsi(st: State, close: number, period: number): number | null {
-  if (st.prevClose == null) {
-    st.prevClose = close;
-    return null;
+function std(values: number[], i: number, len: number): number | null {
+  const m = sma(values, i, len);
+  if (m == null) return null;
+  let v = 0;
+  for (let k = i - len + 1; k <= i; k++) {
+    const d = values[k] - m;
+    v += d * d;
   }
+  return Math.sqrt(v / len);
+}
 
-  const change = close - st.prevClose;
-  const gain = Math.max(0, change);
-  const loss = Math.max(0, -change);
+function rsi(closes: number[], len: number): Array<number | null> {
+  const out: Array<number | null> = Array(closes.length).fill(null);
+  let gain = 0;
+  let loss = 0;
 
-  if (st.avgGain == null || st.avgLoss == null) {
-    const n = st.closes.length;
-    if (n < period + 1) {
-      st.prevClose = close;
-      return null;
+  for (let i = 1; i < closes.length; i++) {
+    const ch = closes[i] - closes[i - 1];
+    const g = ch > 0 ? ch : 0;
+    const l = ch < 0 ? -ch : 0;
+
+    if (i <= len) {
+      gain += g;
+      loss += l;
+      if (i === len) {
+        const avgG = gain / len;
+        const avgL = loss / len;
+        const rs = avgL === 0 ? Infinity : avgG / avgL;
+        out[i] = 100 - 100 / (1 + rs);
+      }
+      continue;
     }
 
-    let sumGain = 0;
-    let sumLoss = 0;
-    for (let i = n - (period + 1) + 1; i < n; i++) {
-      const c0 = st.closes[i - 1];
-      const c1 = st.closes[i];
-      const d = c1 - c0;
-      sumGain += Math.max(0, d);
-      sumLoss += Math.max(0, -d);
+    // Wilder smoothing
+    gain = (gain * (len - 1) + g) / len;
+    loss = (loss * (len - 1) + l) / len;
+
+    const rs = loss === 0 ? Infinity : gain / loss;
+    out[i] = 100 - 100 / (1 + rs);
+  }
+  return out;
+}
+
+function stoch(values: Array<number | null>, len: number): Array<number | null> {
+  const out: Array<number | null> = Array(values.length).fill(null);
+  for (let i = 0; i < values.length; i++) {
+    if (i + 1 < len) continue;
+    // 구간 내 null 있으면 skip
+    let minV = Infinity;
+    let maxV = -Infinity;
+    let ok = true;
+    for (let k = i - len + 1; k <= i; k++) {
+      const v = values[k];
+      if (v == null) { ok = false; break; }
+      minV = Math.min(minV, v);
+      maxV = Math.max(maxV, v);
     }
-    st.avgGain = sumGain / period;
-    st.avgLoss = sumLoss / period;
+    if (!ok) continue;
+    const cur = values[i]!;
+    const denom = (maxV - minV);
+    out[i] = denom === 0 ? 0 : ((cur - minV) / denom) * 100;
+  }
+  return out;
+}
 
-    const rs = st.avgLoss === 0 ? Infinity : st.avgGain / st.avgLoss;
-    const rsi = 100 - 100 / (1 + rs);
+function smaSeries(values: Array<number | null>, len: number): Array<number | null> {
+  const out: Array<number | null> = Array(values.length).fill(null);
+  for (let i = 0; i < values.length; i++) {
+    if (i + 1 < len) continue;
+    let s = 0;
+    for (let k = i - len + 1; k <= i; k++) {
+      const v = values[k];
+      if (v == null) { s = NaN; break; }
+      s += v;
+    }
+    if (Number.isNaN(s)) continue;
+    out[i] = s / len;
+  }
+  return out;
+}
 
-    st.prevClose = close;
-    return rsi;
+export function computeIndicatorsForCandles(candles: Candle[], params = DEFAULT_PARAMS): IndicatorRow[] {
+  if (candles.length === 0) return [];
+
+  const closes = candles.map(c => c.close);
+  const volumes = candles.map(c => c.volume);
+
+  // returns
+  const ret1: Array<number | null> = Array(closes.length).fill(null);
+  const ret5: Array<number | null> = Array(closes.length).fill(null);
+  for (let i = 1; i < closes.length; i++) {
+    ret1[i] = closes[i - 1] === 0 ? null : (closes[i] / closes[i - 1] - 1);
+  }
+  for (let i = 5; i < closes.length; i++) {
+    ret5[i] = closes[i - 5] === 0 ? null : (closes[i] / closes[i - 5] - 1);
   }
 
-  st.avgGain = (st.avgGain * (period - 1) + gain) / period;
-  st.avgLoss = (st.avgLoss * (period - 1) + loss) / period;
+  // MA
+  const maMap: Record<number, Array<number | null>> = {};
+  for (const L of params.maLens) {
+    maMap[L] = Array(closes.length).fill(null);
+    for (let i = 0; i < closes.length; i++) maMap[L][i] = sma(closes, i, L);
+  }
 
-  const rs = st.avgLoss === 0 ? Infinity : st.avgGain / st.avgLoss;
-  const rsi = 100 - 100 / (1 + rs);
+  // BB(20,2)
+  const bbMid: Array<number | null> = Array(closes.length).fill(null);
+  const bbUp: Array<number | null> = Array(closes.length).fill(null);
+  const bbDn: Array<number | null> = Array(closes.length).fill(null);
+  for (let i = 0; i < closes.length; i++) {
+    const m = sma(closes, i, params.bbLen);
+    const sd = std(closes, i, params.bbLen);
+    if (m == null || sd == null) continue;
+    bbMid[i] = m;
+    bbUp[i] = m + params.bbMult * sd;
+    bbDn[i] = m - params.bbMult * sd;
+  }
 
-  st.prevClose = close;
-  return rsi;
-}
+  // RSI / StochRSI
+  const rsi14 = rsi(closes, params.rsiLen);
+  const stochRsi = stoch(rsi14, params.stochLen);
+  const stochK = stochRsi;                 // K는 그대로
+  const stochD = smaSeries(stochK, 3);     // D는 3 SMA
 
-function stochRsiK(st: State, rsi: number, period: number): number | null {
-  st.rsiSeries.push(rsi);
-  if (st.rsiSeries.length < period) return null;
+  // OBV / PVT
+  const obv: Array<number | null> = Array(closes.length).fill(null);
+  const pvt: Array<number | null> = Array(closes.length).fill(null);
+  obv[0] = 0;
+  pvt[0] = 0;
+  for (let i = 1; i < closes.length; i++) {
+    const dir = closes[i] > closes[i - 1] ? 1 : closes[i] < closes[i - 1] ? -1 : 0;
+    obv[i] = (obv[i - 1] ?? 0) + dir * volumes[i];
+    const r = closes[i - 1] === 0 ? 0 : (closes[i] - closes[i - 1]) / closes[i - 1];
+    pvt[i] = (pvt[i - 1] ?? 0) + r * volumes[i];
+  }
 
-  const window = st.rsiSeries.slice(st.rsiSeries.length - period);
-  let lo = Infinity, hi = -Infinity;
-  for (const v of window) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
-
-  const denom = hi - lo;
-  const k = denom === 0 ? 0 : ((rsi - lo) / denom) * 100;
-  return clamp(k, 0, 100);
-}
-
-export function computeIndicatorsForCandles(candlesAsc: Candle[], params = DEFAULT_PARAMS): IndicatorRow[] {
-  const st = createState();
+  // output
   const out: IndicatorRow[] = [];
-
-  for (const c of candlesAsc) {
-    st.closes.push(c.close);
-
-    const ma10 = sma(st.closes, params.ma10);
-    const ma20 = sma(st.closes, params.ma20);
-    const ma60 = sma(st.closes, params.ma60);
-
-    const bbMid = sma(st.closes, params.bbPeriod);
-    const bbStd = stddev(st.closes, params.bbPeriod);
-    const bbUpper = bbMid != null && bbStd != null ? bbMid + params.bbStdMult * bbStd : null;
-    const bbLower = bbMid != null && bbStd != null ? bbMid - params.bbStdMult * bbStd : null;
-
-    const rsi = updateRsi(st, c.close, params.rsiPeriod);
-
-    let stochK: number | null = null;
-    let stochD: number | null = null;
-    if (rsi != null) {
-      const k0 = stochRsiK(st, rsi, params.stochPeriod);
-      if (k0 != null) {
-        st.stochKSeries.push(k0);
-        stochK = sma(st.stochKSeries, params.stochSmoothK);
-        stochD = sma(st.stochKSeries, params.stochSmoothD);
-      }
-    }
-
-    if (st.prevClose != null) {
-      if (c.close > st.prevClose) st.obv += c.volume;
-      else if (c.close < st.prevClose) st.obv -= c.volume;
-
-      if (st.prevClose !== 0) {
-        st.pvt += ((c.close - st.prevClose) / st.prevClose) * c.volume;
-      }
-    }
-
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
     out.push({
       market: c.market,
       tf: c.tf,
       time: c.time,
 
-      bb_mid_20: bbMid,
-      bb_upper_20_2: bbUpper,
-      bb_lower_20_2: bbLower,
+      bb_mid_20: bbMid[i],
+      bb_upper_20_2: bbUp[i],
+      bb_lower_20_2: bbDn[i],
 
-      rsi_14: rsi,
-      stoch_rsi_k_14: stochK,
-      stoch_rsi_d_14: stochD,
+      rsi_14: rsi14[i],
+      stoch_rsi_k_14: stochK[i],
+      stoch_rsi_d_14: stochD[i],
 
-      obv: st.obv,
-      pvt: st.pvt,
+      obv: obv[i],
+      pvt: pvt[i],
 
-      ma_10: ma10,
-      ma_20: ma20,
-      ma_60: ma60
+      ma_7: maMap[7]?.[i],
+      ma_10: maMap[10]?.[i],
+      ma_20: maMap[20]?.[i],
+      ma_50: maMap[50]?.[i],
+      ma_60: maMap[60]?.[i],
+      ma_200: maMap[200]?.[i],
+      ma_400: maMap[400]?.[i],
+      ma_800: maMap[800]?.[i],
+
+      ret_1: ret1[i],
+      ret_5: ret5[i],
+
+      indicator_version: params.version
     });
   }
-
   return out;
 }
