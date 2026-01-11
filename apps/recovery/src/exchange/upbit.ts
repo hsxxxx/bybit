@@ -1,6 +1,6 @@
 // apps/recovery/src/exchange/upbit.ts
 import type { Candle, Tf } from "../types.js";
-import { TF_SEC, floorToTfSec, toUpbitMinutes } from "../timeframes.js";
+import { floorToTfSec, TF_SEC, toUpbitMinutes } from "../timeframes.js";
 
 type Params = {
   baseUrl: string;
@@ -8,13 +8,13 @@ type Params = {
   tf: Tf;
   startSec: number; // inclusive
   endSec: number;   // exclusive
-  sleepMs: number;  // base pacing
+  sleepMs: number;
+  minIntervalMs: number;
 };
 
 function sleep(ms: number) {
   return new Promise<void>(r => setTimeout(r, ms));
 }
-
 function jitter(ms: number) {
   return Math.floor(Math.random() * ms);
 }
@@ -38,14 +38,9 @@ function parseOpenSecFromUpbit(item: any, tf: Tf): number | null {
   return floorToTfSec(Math.floor(t / 1000), tf);
 }
 
-/**
- * ✅ 전역 레이트리미터: 프로세스 내 모든 요청을 직렬/간격 유지
- * - recovery의 worker 여러 개가 있어도 여기서 최종적으로 간격을 강제함
- */
 class RateLimiter {
   private nextAllowed = 0;
   constructor(private minIntervalMs: number) {}
-
   async waitTurn() {
     const now = Date.now();
     const wait = Math.max(0, this.nextAllowed - now);
@@ -54,59 +49,47 @@ class RateLimiter {
   }
 }
 
-// 기본값: 최소 250ms 간격(=초당 4회 수준). 필요시 ENV로 조정
-const GLOBAL_MIN_INTERVAL_MS = Number(process.env.UPBIT_MIN_INTERVAL_MS ?? "250");
-const limiter = new RateLimiter(GLOBAL_MIN_INTERVAL_MS);
+// 프로세스 전역 limiter (Upbit 429 방지)
+let limiter: RateLimiter | null = null;
+
+function getLimiter(minIntervalMs: number) {
+  if (!limiter) limiter = new RateLimiter(minIntervalMs);
+  return limiter;
+}
 
 function parseRetryAfterMs(res: Response): number | null {
-  // 표준 Retry-After (seconds)
   const ra = res.headers.get("retry-after");
   if (ra) {
     const sec = Number(ra);
     if (Number.isFinite(sec) && sec >= 0) return Math.ceil(sec * 1000);
   }
-  // 일부 프록시/게이트웨이에서 ms 혹은 reset 계열이 있을 수 있어 fallback만 둠
-  const reset = res.headers.get("ratelimit-reset"); // 보장X
-  if (reset) {
-    const v = Number(reset);
-    if (Number.isFinite(v) && v > 0) return Math.ceil(v * 1000);
-  }
   return null;
 }
 
-async function fetchJsonWithRetry(url: string, maxRetry: number, baseSleepMs: number) {
+async function fetchJsonWithRetry(url: string, maxRetry: number, baseSleepMs: number, minIntervalMs: number) {
   let lastErr: any = null;
+  const lim = getLimiter(minIntervalMs);
 
   for (let i = 0; i <= maxRetry; i++) {
-    await limiter.waitTurn(); // ✅ 글로벌 pacing
+    await lim.waitTurn();
 
     try {
-      const res = await fetch(url, {
-        method: "GET",
-        headers: { accept: "application/json" }
-      });
+      const res = await fetch(url, { method: "GET", headers: { accept: "application/json" } });
 
       if (res.status === 429) {
         const body = await res.text().catch(() => "");
         const raMs = parseRetryAfterMs(res);
-
-        // ✅ Retry-After 있으면 우선, 없으면 지수백오프
-        const backoff = Math.min(60_000, Math.max(500, baseSleepMs) * Math.pow(2, i));
+        const backoff = Math.min(60_000, Math.max(800, baseSleepMs) * Math.pow(2, i));
         const waitMs = (raMs ?? backoff) + jitter(250);
-
-        console.warn(
-          `[upbit] retryable status=429 try=${i + 1}/${maxRetry + 1} waitMs=${waitMs} url=${url} body=${body.slice(0, 200)}`
-        );
+        console.warn(`[upbit] 429 try=${i + 1}/${maxRetry + 1} waitMs=${waitMs} url=${url} body=${body.slice(0, 120)}`);
         await sleep(waitMs);
         continue;
       }
 
       if (res.status >= 500 && res.status <= 599) {
         const body = await res.text().catch(() => "");
-        const backoff = Math.min(60_000, Math.max(500, baseSleepMs) * Math.pow(2, i)) + jitter(250);
-        console.warn(
-          `[upbit] retryable status=${res.status} try=${i + 1}/${maxRetry + 1} waitMs=${backoff} url=${url} body=${body.slice(0, 200)}`
-        );
+        const backoff = Math.min(60_000, Math.max(800, baseSleepMs) * Math.pow(2, i)) + jitter(250);
+        console.warn(`[upbit] ${res.status} try=${i + 1}/${maxRetry + 1} waitMs=${backoff} url=${url} body=${body.slice(0, 120)}`);
         await sleep(backoff);
         continue;
       }
@@ -119,12 +102,11 @@ async function fetchJsonWithRetry(url: string, maxRetry: number, baseSleepMs: nu
       return await res.json();
     } catch (e) {
       lastErr = e;
-      const backoff = Math.min(60_000, Math.max(500, baseSleepMs) * Math.pow(2, i)) + jitter(250);
-      console.warn(`[upbit] fetch error try=${i + 1}/${maxRetry + 1} waitMs=${backoff} url=${url} err=${String(e).slice(0, 300)}`);
+      const backoff = Math.min(60_000, Math.max(800, baseSleepMs) * Math.pow(2, i)) + jitter(250);
+      console.warn(`[upbit] fetch err try=${i + 1}/${maxRetry + 1} waitMs=${backoff} url=${url} err=${String(e).slice(0, 200)}`);
       await sleep(backoff);
     }
   }
-
   throw lastErr ?? new Error("[upbit] failed");
 }
 
@@ -150,7 +132,7 @@ export async function fetchUpbitCandlesRange(p: Params): Promise<Candle[]> {
       `&count=${limit}` +
       `&to=${encodeURIComponent(toStr)}`;
 
-    const arr = await fetchJsonWithRetry(url, maxRetry, p.sleepMs);
+    const arr = await fetchJsonWithRetry(url, maxRetry, p.sleepMs, p.minIntervalMs);
 
     if (!Array.isArray(arr) || arr.length === 0) break;
 
@@ -176,14 +158,9 @@ export async function fetchUpbitCandlesRange(p: Params): Promise<Candle[]> {
         volume: Number(item.candle_acc_trade_volume)
       };
 
-      if (
-        !Number.isFinite(c.open) ||
-        !Number.isFinite(c.high) ||
-        !Number.isFinite(c.low) ||
-        !Number.isFinite(c.close) ||
-        !Number.isFinite(c.volume)
-      ) continue;
-
+      if (!Number.isFinite(c.open) || !Number.isFinite(c.high) || !Number.isFinite(c.low) || !Number.isFinite(c.close) || !Number.isFinite(c.volume)) {
+        continue;
+      }
       out.push(c);
     }
 
@@ -192,8 +169,11 @@ export async function fetchUpbitCandlesRange(p: Params): Promise<Candle[]> {
 
     cursorToSec = oldestOpenSec;
 
-    // ✅ 정상요청도 약간 쉬어줘서 429 자체를 줄임
-    if (p.sleepMs > 0) await sleep(p.sleepMs + jitter(100));
+    // 정상 요청 페이싱
+    if (p.sleepMs > 0) await sleep(p.sleepMs + jitter(120));
+
+    // safety
+    if (out.length > 2_000_000) break;
   }
 
   out.sort((a, b) => a.time - b.time);

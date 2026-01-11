@@ -1,15 +1,9 @@
 // apps/recovery/src/recovery.ts
-import type { RecoveryConfig, Candle, Tf } from "./types.js";
-import { rangeSlotsSec, TF_SEC, floorToTfSec } from "./timeframes.js";
+import type { RecoveryConfig, Tf, Candle, IndicatorRow } from "./types.js";
+import { TF_SEC, floorToTfSec, rangeSlotsSec } from "./timeframes.js";
 import { createMaria } from "./db/mariadb.js";
-import { createCandleProducer } from "./kafka/producer.js";
 import { fetchUpbitCandlesRange } from "./exchange/upbit.js";
-
-type SlotPlan = {
-  market: string;
-  tf: Tf;
-  missingTimes: number[]; // seconds (candle open time)
-};
+import { computeIndicatorsForCandles, DEFAULT_PARAMS } from "./indicators/core.js";
 
 type Range = { startSec: number; endSec: number };
 
@@ -18,144 +12,152 @@ function envBool(name: string, def = false): boolean {
   if (v == null) return def;
   return ["1", "true", "yes", "y", "on"].includes(String(v).toLowerCase());
 }
-
 const DEBUG_RECOVERY = envBool("DEBUG_RECOVERY", false);
 
 export async function runRecovery(cfg: RecoveryConfig) {
   const maria = await createMaria(cfg.db);
 
-  const producer = cfg.kafka.enabled
-    ? createCandleProducer({ brokers: cfg.kafka.brokers, clientId: cfg.kafka.clientId })
-    : null;
-
-  if (producer) await producer.connect();
-
   try {
-    const plans: SlotPlan[] = [];
-
     for (const market of cfg.markets) {
       for (const tf of cfg.tfs) {
         const step = TF_SEC[tf];
 
-        // ✅ expected / DB 조회 범위가 항상 동일한 규칙이 되게 통일
         const start = floorToTfSec(cfg.startSec, tf);
         const end = floorToTfSec(cfg.endSec - 1, tf) + step; // exclusive
-
         if (!(start < end)) continue;
 
-        const expected = rangeSlotsSec(start, end, tf);
-        const existing = await maria.getExistingTimes({
-          market,
-          tf,
-          startSec: start,
-          endSec: end
-        });
+        // -------------------------
+        // 1) CANDLE BACKFILL (optional)
+        // -------------------------
+        if (cfg.task === "candle" || cfg.task === "both") {
+          const expected = rangeSlotsSec(start, end, tf);
+          const existing = await maria.getExistingCandleTimes({ market, tf, startSec: start, endSec: end });
 
-        const missing = expected.filter(t => !existing.has(t));
-        if (missing.length === 0) continue;
-
-        if (missing.length > cfg.maxMissingPerMarket) {
-          throw new Error(
-            `Too many missing slots market=${market} tf=${tf} missing=${missing.length} > MAX_MISSING_PER_MARKET=${cfg.maxMissingPerMarket}`
-          );
-        }
-
-        plans.push({ market, tf, missingTimes: missing });
-      }
-    }
-
-    if (plans.length === 0) {
-      console.log("[recovery] no missing slots");
-      return;
-    }
-
-    console.log(`[recovery] plans=${plans.length}`);
-
-    for (const p of plans) {
-      const step = TF_SEC[p.tf];
-      const ranges = toContiguousRanges(p.missingTimes, step);
-
-      console.log(
-        `[recovery] ${p.market} ${p.tf} missing=${p.missingTimes.length} ranges=${ranges.length}`
-      );
-
-      const missingSet = new Set(p.missingTimes);
-
-      const fetchedAll: Candle[] = [];
-
-      // ✅ 큐 기반 워커 (권장: REST_CONCURRENCY=1로 429 줄이기)
-      const queue = ranges.slice();
-      const workers = Array.from({ length: Math.max(1, cfg.restConcurrency) }, async () => {
-        while (queue.length) {
-          const r = queue.shift();
-          if (!r) break;
-
-          // Upbit REST fetch (역방향 페이징 + 레이트리밋은 upbit.ts에서 처리)
-          const candles = await fetchUpbitCandlesRange({
-            baseUrl: cfg.upbit.baseUrl,
-            market: p.market,
-            tf: p.tf,
-            startSec: r.startSec,
-            endSec: r.endSec,
-            sleepMs: cfg.restSleepMs
-          });
-
-          if (DEBUG_RECOVERY) {
-            // ✅ 어디서 0이 되는지 한 줄로 확정
-            let inRange = 0;
-            let matched = 0;
-            let minT = Number.POSITIVE_INFINITY;
-            let maxT = 0;
-
-            for (const c of candles) {
-              if (c.time >= r.startSec && c.time < r.endSec) inRange++;
-              minT = Math.min(minT, c.time);
-              maxT = Math.max(maxT, c.time);
-              if (missingSet.has(c.time)) matched++;
+          const missing = expected.filter(t => !existing.has(t));
+          if (missing.length > 0) {
+            if (missing.length > cfg.maxMissingPerMarket) {
+              throw new Error(`Too many candle missing market=${market} tf=${tf} missing=${missing.length}`);
             }
 
-            console.log(
-              `[dbg] market=${p.market} tf=${p.tf} range=[${r.startSec},${r.endSec}) got=${candles.length} inRange=${inRange} matchedMissing=${matched} gotMin=${Number.isFinite(minT) ? minT : -1} gotMax=${maxT || -1}`
-            );
-          }
+            const ranges = toContiguousRanges(missing, step);
+            console.log(`[recovery] candle ${market} ${tf} missing=${missing.length} ranges=${ranges.length}`);
 
-          // ✅ missing에 해당하는 time만 수집
-          for (const c of candles) {
-            if (missingSet.has(c.time)) fetchedAll.push(c);
+            // worker queue
+            const queue = ranges.slice();
+            const fetchedAll: Candle[] = [];
+
+            const workers = Array.from({ length: Math.max(1, cfg.restConcurrency) }, async () => {
+              while (queue.length) {
+                const r = queue.shift();
+                if (!r) break;
+
+                const candles = await fetchUpbitCandlesRange({
+                  baseUrl: cfg.upbit.baseUrl,
+                  market,
+                  tf,
+                  startSec: r.startSec,
+                  endSec: r.endSec,
+                  sleepMs: cfg.restSleepMs,
+                  minIntervalMs: cfg.upbitMinIntervalMs
+                });
+
+                if (DEBUG_RECOVERY) {
+                  let minT = Number.POSITIVE_INFINITY;
+                  let maxT = 0;
+                  for (const c of candles) { minT = Math.min(minT, c.time); maxT = Math.max(maxT, c.time); }
+                  console.log(`[dbg] candleFetch ${market} ${tf} range=[${r.startSec},${r.endSec}) got=${candles.length} min=${Number.isFinite(minT)?minT:-1} max=${maxT||-1}`);
+                }
+
+                fetchedAll.push(...candles);
+              }
+            });
+
+            await Promise.all(workers);
+
+            // uniq by time
+            fetchedAll.sort((a, b) => a.time - b.time);
+            const uniq: Candle[] = [];
+            let prev = -1;
+            for (const c of fetchedAll) {
+              if (c.time === prev) continue;
+              prev = c.time;
+              uniq.push(c);
+            }
+
+            if (uniq.length > 0) {
+              await maria.upsertCandles(uniq);
+              console.log(`[recovery] candle upserted=${uniq.length} market=${market} tf=${tf}`);
+            }
           }
         }
-      });
 
-      await Promise.all(workers);
+        // -------------------------
+        // 2) INDICATOR BACKFILL (optional)
+        // -------------------------
+        if (cfg.task === "indicator" || cfg.task === "both") {
+          // indicator 생성은 lookback warmup 필요
+          const warmupSec = cfg.indicatorLookbackBars * step;
 
-      // ✅ 정렬 + time uniq
-      fetchedAll.sort((a, b) => a.time - b.time);
-      const uniq: Candle[] = [];
-      let prev = -1;
-      for (const c of fetchedAll) {
-        if (c.time === prev) continue;
-        prev = c.time;
-        uniq.push(c);
-      }
+          const indStart = start;
+          const indEnd = end;
 
-      if (uniq.length === 0) {
-        console.log(`[recovery] fetched=0 market=${p.market} tf=${p.tf}`);
-        continue;
-      }
+          // indicator 존재 여부로 missing 판단
+          const expectedInd = rangeSlotsSec(indStart, indEnd, tf);
+          const existingInd = await maria.getExistingIndicatorTimes({ market, tf, startSec: indStart, endSec: indEnd });
 
-      if (cfg.mode === "direct_db") {
-        await maria.upsertCandles(uniq);
-        console.log(`[recovery] direct_db upserted=${uniq.length} market=${p.market} tf=${p.tf}`);
-      } else {
-        if (!producer) throw new Error("RECOVERY_MODE=republish requires kafka enabled");
-        await producer.sendCandles(cfg.kafka.topicCandle, uniq, cfg.kafka.batchBytes);
-        console.log(
-          `[recovery] republished=${uniq.length} topic=${cfg.kafka.topicCandle} market=${p.market} tf=${p.tf}`
-        );
+          const missingInd = expectedInd.filter(t => !existingInd.has(t));
+          if (missingInd.length === 0) continue;
+
+          // indicator 계산을 위해 더 과거 candle 필요
+          const computeStart = Math.max(0, indStart - warmupSec);
+          const computeEnd = indEnd;
+
+          // candle 로드
+          const candles = await maria.getCandles({ market, tf, startSec: computeStart, endSec: computeEnd });
+          if (candles.length === 0) {
+            console.log(`[recovery] indicator skip(no candles) market=${market} tf=${tf}`);
+            continue;
+          }
+
+          // indicator 계산
+          const rows = computeIndicatorsForCandles(candles, DEFAULT_PARAMS);
+
+          // target 범위 + missing만 필터
+          const missingSet = new Set(missingInd);
+          const toUpsert: IndicatorRow[] = [];
+          for (const r of rows) {
+            if (r.time < indStart || r.time >= indEnd) continue;
+            if (!missingSet.has(r.time)) continue;
+
+            // "계산 가능" 최소조건: BB/RSI 같은 핵심이 null이면 skip (원하면 완화 가능)
+            // 여기선 BB mid + RSI 둘 중 하나라도 있으면 넣도록(유연)
+            const ok =
+              (r.bb_mid_20 != null) ||
+              (r.rsi_14 != null) ||
+              (r.obv != null) ||
+              (r.pvt != null);
+
+            if (ok) toUpsert.push(r);
+          }
+
+          if (DEBUG_RECOVERY) {
+            console.log(`[dbg] indicator ${market} ${tf} missing=${missingInd.length} candlesLoaded=${candles.length} computedRows=${rows.length} upsert=${toUpsert.length} computeRange=[${computeStart},${computeEnd})`);
+          } else {
+            console.log(`[recovery] indicator ${market} ${tf} missing=${missingInd.length} upsert=${toUpsert.length}`);
+          }
+
+          if (toUpsert.length > 0) {
+            // 너무 큰 배치는 쪼개기
+            const chunkSize = 2000;
+            for (let i = 0; i < toUpsert.length; i += chunkSize) {
+              await maria.upsertIndicators(toUpsert.slice(i, i + chunkSize));
+            }
+            console.log(`[recovery] indicator upserted=${toUpsert.length} market=${market} tf=${tf}`);
+          }
+        }
       }
     }
   } finally {
-    if (producer) await producer.disconnect().catch(() => {});
     await maria.close().catch(() => {});
   }
 }
