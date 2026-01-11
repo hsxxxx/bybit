@@ -1,6 +1,25 @@
 // src/exchange/upbit.ts
 import { tfKeyFromSec, toKstIsoNoMs } from "../timeframes.js";
 
+export type UpbitMarket = {
+  market: string;       // "KRW-BTC"
+  korean_name: string;
+  english_name: string;
+};
+
+export async function fetchUpbitMarkets(params?: {
+  quote?: "KRW" | "BTC" | "USDT" | "ALL";
+}): Promise<UpbitMarket[]> {
+  const quote = params?.quote ?? "KRW";
+
+  const url = "https://api.upbit.com/v1/market/all?isDetails=false";
+  const rows = await fetchJson<UpbitMarket[]>(url);
+
+  if (quote === "ALL") return rows;
+
+  return rows.filter((m) => m.market.startsWith(`${quote}-`));
+}
+
 export type UpbitCandle = {
   market: string;
   candle_date_time_utc: string;
