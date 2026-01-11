@@ -30,22 +30,13 @@ module.exports = {
     {
       name: "viewer",
       cwd: __dirname + "/viewer",
-      script: "node_modules/next/dist/bin/next",
-      args: ["start", "-p", "3000"],
-      autorestart: true,
-      restart_delay: 2000,
-      env: { NODE_ENV: "production", PORT: "3000" }
-    },
-    {
-      name: "viewer-ws",
-      cwd: __dirname + "/viewer",
       script: "node",
-      args: ["dist/scripts/viewer-ws.js"],
+      args: ["dist/index.js"],
       autorestart: true,
       restart_delay: 2000,
       env: {
         NODE_ENV: "production",
-        WS_HOST: "0.0.0.0",
+        PORT: "3100",
         PORT_WS: "3101"
       }
     }
