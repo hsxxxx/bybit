@@ -2,22 +2,22 @@
   "name": "@bits/recovery",
   "version": "1.0.0",
   "private": true,
-  "type": "commonjs",
-  "main": "dist/index.js",
+  "type": "module",
   "scripts": {
-    "dev": "ts-node src/index.ts",
+    "dev": "ts-node --esm src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js"
   },
   "dependencies": {
+    "axios": "^1.7.7",
+    "commander": "^12.1.0",
+    "dayjs": "^1.11.13",
     "dotenv": "^16.4.5",
-    "mariadb": "^3.3.1",
-    "p-limit": "^6.2.0",
-    "undici": "^6.19.8"
+    "mysql2": "^3.11.3"
   },
   "devDependencies": {
-    "@types/node": "^20.11.30",
+    "@types/node": "^22.10.10",
     "ts-node": "^10.9.2",
-    "typescript": "^5.5.4"
+    "typescript": "^5.6.3"
   }
 }

@@ -1,156 +1,121 @@
-// src/indicators.ts
-export type Candle = {
-  time: number; // unix seconds (open time)
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-};
+import type { CandleRow } from "./db.js";
 
-function sma(arr: number[], period: number, idx: number): number | null {
+/**
+ * 간단 구현 (외부 TA-Lib 없이)
+ * - SMA
+ * - RSI(14)
+ * - StochRSI(14)
+ * - BB(20, 2)
+ * - OBV
+ * - PVT
+ */
+
+function sma(values: number[], period: number, idx: number): number | null {
   if (idx + 1 < period) return null;
-  let s = 0;
-  for (let i = idx - period + 1; i <= idx; i++) s += arr[i];
-  return s / period;
+  let sum = 0;
+  for (let i = idx - period + 1; i <= idx; i++) sum += values[i];
+  return sum / period;
 }
 
-function std(arr: number[], period: number, idx: number): number | null {
-  const m = sma(arr, period, idx);
+function std(values: number[], period: number, idx: number): number | null {
+  const m = sma(values, period, idx);
   if (m == null) return null;
   let v = 0;
   for (let i = idx - period + 1; i <= idx; i++) {
-    const d = arr[i] - m;
+    const d = values[i] - m;
     v += d * d;
   }
   return Math.sqrt(v / period);
 }
 
-function emaSeries(arr: number[], period: number): (number | null)[] {
-  const out: (number | null)[] = new Array(arr.length).fill(null);
-  const k = 2 / (period + 1);
-
-  let prev: number | null = null;
-  for (let i = 0; i < arr.length; i++) {
-    const v = arr[i];
-    if (i + 1 < period) continue;
-
-    if (prev === null) {
-      let s = 0;
-      for (let j = i - period + 1; j <= i; j++) s += arr[j];
-      prev = s / period;
-      out[i] = prev;
-      continue;
-    }
-
-    prev = v * k + prev * (1 - k);
-    out[i] = prev;
-  }
-  return out;
-}
-
-function rsiSeries(closes: number[], period: number): (number | null)[] {
-  const out: (number | null)[] = new Array(closes.length).fill(null);
-  if (closes.length < period + 1) return out;
-
+function rsi(values: number[], period: number, idx: number): number | null {
+  if (idx < period) return null;
   let gain = 0;
   let loss = 0;
-
-  for (let i = 1; i <= period; i++) {
-    const diff = closes[i] - closes[i - 1];
-    if (diff >= 0) gain += diff;
-    else loss -= diff;
+  for (let i = idx - period + 1; i <= idx; i++) {
+    const ch = values[i] - values[i - 1];
+    if (ch >= 0) gain += ch;
+    else loss += -ch;
   }
-
-  let avgGain = gain / period;
-  let avgLoss = loss / period;
-
-  const rs0 = avgLoss === 0 ? Infinity : avgGain / avgLoss;
-  out[period] = 100 - 100 / (1 + rs0);
-
-  for (let i = period + 1; i < closes.length; i++) {
-    const diff = closes[i] - closes[i - 1];
-    const g = diff > 0 ? diff : 0;
-    const l = diff < 0 ? -diff : 0;
-
-    avgGain = (avgGain * (period - 1) + g) / period;
-    avgLoss = (avgLoss * (period - 1) + l) / period;
-
-    const rs = avgLoss === 0 ? Infinity : avgGain / avgLoss;
-    out[i] = 100 - 100 / (1 + rs);
-  }
-
-  return out;
+  if (gain === 0 && loss === 0) return 50;
+  if (loss === 0) return 100;
+  const rs = gain / loss;
+  return 100 - 100 / (1 + rs);
 }
 
-function roc(closes: number[], period: number, idx: number): number | null {
-  if (idx < period) return null;
-  const prev = closes[idx - period];
-  if (prev === 0) return null;
-  return ((closes[idx] - prev) / prev) * 100;
+function stoch(values: number[], period: number, idx: number): number | null {
+  if (idx + 1 < period) return null;
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (let i = idx - period + 1; i <= idx; i++) {
+    lo = Math.min(lo, values[i]);
+    hi = Math.max(hi, values[i]);
+  }
+  const denom = hi - lo;
+  if (denom === 0) return 0;
+  return ((values[idx] - lo) / denom) * 100;
 }
 
-export function computeIndicators(candlesAsc: Candle[]) {
+export type IndicatorPack = Record<string, number | null>;
+
+export function computeIndicators(candlesAsc: CandleRow[]): IndicatorPack[] {
   const closes = candlesAsc.map((c) => c.close);
-  const vols = candlesAsc.map((c) => c.volume);
+  const volumes = candlesAsc.map((c) => c.volume);
 
-  const ema12 = emaSeries(closes, 12);
-  const ema26 = emaSeries(closes, 26);
-
-  const macdLine: (number | null)[] = closes.map((_, i) => {
-    if (ema12[i] == null || ema26[i] == null) return null;
-    return (ema12[i] as number) - (ema26[i] as number);
-  });
-
-  const macdFill = macdLine.map((v) => (v == null ? 0 : v));
-  const macdSignal = emaSeries(macdFill, 9);
-
-  const rsi14 = rsiSeries(closes, 14);
+  const out: IndicatorPack[] = [];
 
   let obv = 0;
   let pvt = 0;
 
-  const out = candlesAsc.map((c, i) => {
-    if (i > 0) {
-      if (closes[i] > closes[i - 1]) obv += vols[i];
-      else if (closes[i] < closes[i - 1]) obv -= vols[i];
+  // StochRSI 계산용 RSI 배열
+  const rsiArr: (number | null)[] = new Array(closes.length).fill(null);
 
-      const prev = closes[i - 1];
-      if (prev !== 0) pvt += ((closes[i] - prev) / prev) * vols[i];
+  for (let i = 0; i < candlesAsc.length; i++) {
+    // OBV
+    if (i === 0) {
+      obv = 0;
+      pvt = 0;
+    } else {
+      const prevClose = closes[i - 1];
+      const curClose = closes[i];
+
+      if (curClose > prevClose) obv += volumes[i];
+      else if (curClose < prevClose) obv -= volumes[i];
+
+      if (prevClose !== 0) {
+        pvt += ((curClose - prevClose) / prevClose) * volumes[i];
+      }
     }
 
-    const mid20 = sma(closes, 20, i);
-    const sd20 = std(closes, 20, i);
-    const upper = mid20 != null && sd20 != null ? mid20 + 2 * sd20 : null;
-    const lower = mid20 != null && sd20 != null ? mid20 - 2 * sd20 : null;
+    const rsi14 = rsi(closes, 14, i);
+    rsiArr[i] = rsi14;
 
-    const macd = macdLine[i];
-    const sig = macdSignal[i];
-    const hist = macd != null && sig != null ? macd - sig : null;
+    // StochRSI(14): RSI 값에 대해 stoch(14)
+    const stochRsi14 =
+      rsi14 == null ? null : stoch(rsiArr.map((x) => x ?? 0), 14, i);
 
-    return {
-      sma_10: sma(closes, 10, i),
-      sma_60: sma(closes, 60, i),
-      sma_120: sma(closes, 120, i),
+    const sma20 = sma(closes, 20, i);
+    const std20 = std(closes, 20, i);
+    const bbUpper = sma20 == null || std20 == null ? null : sma20 + 2 * std20;
+    const bbLower = sma20 == null || std20 == null ? null : sma20 - 2 * std20;
 
-      ema_12: ema12[i],
-      ema_26: ema26[i],
+    const sma10 = sma(closes, 10, i);
+    const sma60 = sma(closes, 60, i);
+    const sma120 = sma(closes, 120, i);
 
-      rsi_14: rsi14[i],
-
-      macd,
-      macd_signal: sig,
-      macd_hist: hist,
-
-      bb_mid_20: mid20,
-      bb_upper_20_2: upper,
-      bb_lower_20_2: lower,
-
+    out.push({
+      sma_10: sma10,
+      sma_20: sma20,
+      sma_60: sma60,
+      sma_120: sma120,
+      rsi_14: rsi14,
+      stoch_rsi_14: stochRsi14,
+      bb_upper_20_2: bbUpper,
+      bb_lower_20_2: bbLower,
       obv,
-      pvt,
-      roc_20: roc(closes, 20, i),
-    };
-  });
+      pvt
+    });
+  }
 
   return out;
 }

@@ -1,140 +1,161 @@
-import mariadb, { Pool } from "mariadb";
-import type { CandleRow, IndicatorRow } from "./types";
+import mysql from "mysql2/promise";
+import { config } from "./config.js";
 
-export function createPool(cfg: {
-  host: string;
-  port: number;
-  user: string;
-  password: string;
-  database: string;
-  connectionLimit: number;
-}): Pool {
-  return mariadb.createPool({
-    host: cfg.host,
-    port: cfg.port,
-    user: cfg.user,
-    password: cfg.password,
-    database: cfg.database,
-    connectionLimit: cfg.connectionLimit,
-    timezone: "Z", // store/read unix seconds, timezone irrelevant but keep deterministic
-    bigIntAsNumber: true
-  });
+export type CandleRow = {
+  market: string;
+  tf: string;
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+};
+
+export type IndicatorRow = {
+  market: string;
+  tf: string;
+  time: number;
+  indicators: any; // JSON
+};
+
+export const pool = mysql.createPool({
+  host: config.db.host,
+  port: config.db.port,
+  user: config.db.user,
+  password: config.db.password,
+  database: config.db.database,
+  connectionLimit: 10,
+  waitForConnections: true
+});
+
+export async function pingDb(): Promise<void> {
+  const c = await pool.getConnection();
+  try {
+    await c.ping();
+  } finally {
+    c.release();
+  }
 }
 
-// -------------------- Candle upsert --------------------
+export async function selectDistinctMarkets(): Promise<string[]> {
+  const [rows] = await pool.query<any[]>(
+    `SELECT DISTINCT market FROM upbit_candle ORDER BY market ASC`
+  );
+  return rows.map((r) => String(r.market));
+}
 
-export async function upsertCandles(pool: Pool, rows: CandleRow[]): Promise<void> {
-  if (!rows || rows.length === 0) return;
+export async function selectExistingCandleTimes(params: {
+  market: string;
+  tf: string;
+  start: number;
+  end: number;
+}): Promise<Set<number>> {
+  const [rows] = await pool.query<any[]>(
+    `SELECT time FROM upbit_candle
+     WHERE market=? AND tf=? AND time BETWEEN ? AND ?
+     ORDER BY time ASC`,
+    [params.market, params.tf, params.start, params.end]
+  );
+  return new Set(rows.map((r) => Number(r.time)));
+}
 
-  const sql = `
-    INSERT INTO upbit_candle
+export async function selectExistingIndicatorTimes(params: {
+  market: string;
+  tf: string;
+  start: number;
+  end: number;
+}): Promise<Set<number>> {
+  const [rows] = await pool.query<any[]>(
+    `SELECT time FROM upbit_indicator
+     WHERE market=? AND tf=? AND time BETWEEN ? AND ?
+     ORDER BY time ASC`,
+    [params.market, params.tf, params.start, params.end]
+  );
+  return new Set(rows.map((r) => Number(r.time)));
+}
+
+export async function selectCandlesAsc(params: {
+  market: string;
+  tf: string;
+  start: number;
+  end: number;
+}): Promise<CandleRow[]> {
+  const [rows] = await pool.query<any[]>(
+    `SELECT market, tf, time, open, high, low, close, volume
+     FROM upbit_candle
+     WHERE market=? AND tf=? AND time BETWEEN ? AND ?
+     ORDER BY time ASC`,
+    [params.market, params.tf, params.start, params.end]
+  );
+
+  return rows.map((r) => ({
+    market: String(r.market),
+    tf: String(r.tf),
+    time: Number(r.time),
+    open: Number(r.open),
+    high: Number(r.high),
+    low: Number(r.low),
+    close: Number(r.close),
+    volume: Number(r.volume)
+  }));
+}
+
+export async function upsertCandles(rows: CandleRow[], mode: "all" | "missing"): Promise<number> {
+  if (rows.length === 0) return 0;
+
+  // batch insert
+  const values = rows.map((r) => [r.market, r.tf, r.time, r.open, r.high, r.low, r.close, r.volume]);
+
+  if (mode === "missing") {
+    const [res] = await pool.query<any>(
+      `INSERT IGNORE INTO upbit_candle
+        (market, tf, time, open, high, low, close, volume)
+       VALUES ?`,
+      [values]
+    );
+    return Number(res.affectedRows ?? 0);
+  }
+
+  const [res] = await pool.query<any>(
+    `INSERT INTO upbit_candle
       (market, tf, time, open, high, low, close, volume)
-    VALUES
-      (?, ?, ?, ?, ?, ?, ?, ?)
-    ON DUPLICATE KEY UPDATE
-      open = VALUES(open),
-      high = VALUES(high),
-      low  = VALUES(low),
-      close= VALUES(close),
-      volume = VALUES(volume)
-  `;
+     VALUES ?
+     ON DUPLICATE KEY UPDATE
+       open=VALUES(open),
+       high=VALUES(high),
+       low=VALUES(low),
+       close=VALUES(close),
+       volume=VALUES(volume)`,
+    [values]
+  );
 
-  const conn = await pool.getConnection();
-  try {
-    await conn.beginTransaction();
-    for (const r of rows) {
-      await conn.query(sql, [
-        r.market,
-        r.tf,
-        r.time,
-        r.open,
-        r.high,
-        r.low,
-        r.close,
-        r.volume
-      ]);
-    }
-    await conn.commit();
-  } catch (e) {
-    await conn.rollback();
-    throw e;
-  } finally {
-    conn.release();
-  }
+  return Number(res.affectedRows ?? 0);
 }
 
-// -------------------- Indicator upsert --------------------
+export async function upsertIndicators(rows: IndicatorRow[], mode: "all" | "missing"): Promise<number> {
+  if (rows.length === 0) return 0;
 
-export async function upsertIndicators(pool: Pool, rows: IndicatorRow[]): Promise<void> {
-  if (!rows || rows.length === 0) return;
+  const values = rows.map((r) => [r.market, r.tf, r.time, JSON.stringify(r.indicators)]);
 
-  const sql = `
-    INSERT INTO upbit_indicator
+  if (mode === "missing") {
+    const [res] = await pool.query<any>(
+      `INSERT IGNORE INTO upbit_indicator
+        (market, tf, time, indicators)
+       VALUES ?`,
+      [values]
+    );
+    return Number(res.affectedRows ?? 0);
+  }
+
+  const [res] = await pool.query<any>(
+    `INSERT INTO upbit_indicator
       (market, tf, time, indicators)
-    VALUES
-      (?, ?, ?, ?)
-    ON DUPLICATE KEY UPDATE
-      indicators = VALUES(indicators)
-  `;
+     VALUES ?
+     ON DUPLICATE KEY UPDATE
+       indicators=VALUES(indicators)`,
+    [values]
+  );
 
-  const conn = await pool.getConnection();
-  try {
-    await conn.beginTransaction();
-    for (const r of rows) {
-      await conn.query(sql, [r.market, r.tf, r.time, JSON.stringify(r.indicators)]);
-    }
-    await conn.commit();
-  } catch (e) {
-    await conn.rollback();
-    throw e;
-  } finally {
-    conn.release();
-  }
-}
-
-// -------------------- NEW: Fill helpers --------------------
-
-/**
- * 범위 내 캔들 오름차순 조회 (fill 단계용)
- */
-export async function selectCandlesAsc(
-  pool: Pool,
-  market: string,
-  tf: string,
-  startSec: number,
-  endSec: number
-): Promise<CandleRow[]> {
-  const sql = `
-    SELECT market, tf, time, open, high, low, close, volume
-    FROM upbit_candle
-    WHERE market = ?
-      AND tf = ?
-      AND time BETWEEN ? AND ?
-    ORDER BY time ASC
-  `;
-  const rows = await pool.query(sql, [market, tf, startSec, endSec]);
-  return rows as CandleRow[];
-}
-
-/**
- * startSec 이전 가장 마지막 캔들 1개 조회 (fill seed용)
- */
-export async function selectLastCandleBefore(
-  pool: Pool,
-  market: string,
-  tf: string,
-  startSec: number
-): Promise<CandleRow | null> {
-  const sql = `
-    SELECT market, tf, time, open, high, low, close, volume
-    FROM upbit_candle
-    WHERE market = ?
-      AND tf = ?
-      AND time < ?
-    ORDER BY time DESC
-    LIMIT 1
-  `;
-  const rows = await pool.query(sql, [market, tf, startSec]);
-  if (!rows || rows.length === 0) return null;
-  return rows[0] as CandleRow;
+  return Number(res.affectedRows ?? 0);
 }
