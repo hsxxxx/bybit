@@ -20,10 +20,22 @@ function chunk<T>(arr: T[], n: number): T[][] {
 }
 
 /**
- * Upbit 캔들 fetch는 "to" 기준으로 과거로 내려가며 count<=200.
- * 우리는 start~end를 채우는 것이 목적.
+ * (핵심 변경) 범위를 6시간 단위로 쪼개서 Upbit 호출량/대기/로그를 안정화
+ * - 1m: 6h=360개 -> 2페이지면 충분
+ * - 5m: 6h=72개  -> 1페이지
  */
-async function fetchCandlesRange(params: {
+function splitRange(startSec: number, endSec: number, chunkSec: number): Array<{ s: number; e: number }> {
+  const out: Array<{ s: number; e: number }> = [];
+  let s = startSec;
+  while (s <= endSec) {
+    const e = Math.min(endSec, s + chunkSec - 1);
+    out.push({ s, e });
+    s = e + 1;
+  }
+  return out;
+}
+
+async function fetchCandlesRangeChunk(params: {
   market: string;
   tf: Tf;
   startSec: number;
@@ -35,14 +47,16 @@ async function fetchCandlesRange(params: {
   const start = floorToTf(params.startSec, tfMin);
   const end = floorToTf(params.endSec, tfMin);
 
-  const all: CandleRow[] = [];
+  const map = new Map<number, CandleRow>();
 
-  // pagination: end부터 과거로
   let cursorEnd = end;
+  let page = 0;
 
   while (cursorEnd >= start) {
-    // Upbit "to"는 KST ISO로 주고, count는 최대 200
+    page += 1;
     const toIso = unixSecToKstIso(cursorEnd);
+
+    log.info(`[fetch] ${params.market} ${params.tf} page=${page} to=${toIso}`);
 
     const batch = await fetchMinuteCandles({
       market: params.market,
@@ -52,37 +66,27 @@ async function fetchCandlesRange(params: {
     });
 
     if (batch.length === 0) {
-      // 더 이상 못가면 break (하지만 이 경우도 gap fill로 처리)
+      // 응답이 비면 더 과거로 이동
       cursorEnd -= 200 * stepSec;
       continue;
     }
 
-    all.push(...batch);
+    for (const r of batch) {
+      if (r.time < start || r.time > end) continue;
+      map.set(r.time, r);
+    }
 
     const oldest = batch[0]!.time;
-    // 다음 cursor는 oldest - step
+    const newest = batch[batch.length - 1]!.time;
+    log.info(`[fetch] ${params.market} ${params.tf} got=${batch.length} range=[${oldest}..${newest}] uniq=${map.size}`);
+
     cursorEnd = oldest - stepSec;
-
-    // start를 충분히 넘겼으면 종료
     if (oldest <= start) break;
-  }
-
-  // 범위 필터 + uniq
-  const map = new Map<number, CandleRow>();
-  for (const r of all) {
-    if (r.time < start || r.time > end) continue;
-    map.set(r.time, r);
   }
 
   return Array.from(map.values()).sort((a, b) => a.time - b.time);
 }
 
-/**
- * 누락 캔들(거래 없음) 생성:
- * - time grid 기준으로 candle이 없으면
- *   open/high/low/close = 이전 close (없으면 0)
- *   volume = 0
- */
 function gapFillCandles(params: {
   market: string;
   tf: Tf;
@@ -126,48 +130,46 @@ export async function recoverCandles(params: {
   endSec: number;
   mode: Mode;
 }): Promise<void> {
+  // 6시간 단위(21600초)
+  const CHUNK_SEC = 6 * 60 * 60;
+
+  const ranges = splitRange(params.startSec, params.endSec, CHUNK_SEC);
+
   for (const market of params.markets) {
     for (const tf of params.tfs) {
-      log.info(`[candle] start market=${market} tf=${tf} mode=${params.mode}`);
+      log.info(`[candle] start market=${market} tf=${tf} mode=${params.mode} chunks=${ranges.length}`);
 
-      const fetched = await fetchCandlesRange({
-        market,
-        tf,
-        startSec: params.startSec,
-        endSec: params.endSec
-      });
+      for (let i = 0; i < ranges.length; i++) {
+        const { s, e } = ranges[i]!;
+        log.info(`[candle] chunk ${i + 1}/${ranges.length} market=${market} tf=${tf} start=${unixSecToKstIso(s)} end=${unixSecToKstIso(e)}`);
 
-      const filled = gapFillCandles({
-        market,
-        tf,
-        startSec: params.startSec,
-        endSec: params.endSec,
-        fetchedAsc: fetched
-      });
+        const fetched = await fetchCandlesRangeChunk({ market, tf, startSec: s, endSec: e });
+        const filled = gapFillCandles({ market, tf, startSec: s, endSec: e, fetchedAsc: fetched });
 
-      if (params.mode === "missing") {
-        // existing 조회 후 missing만 insert
-        // 너무 큰 범위면 부담 → 1일 단위로 쪼개기 권장, 하지만 여기선 범위 기반으로 처리
-        const existing = await selectExistingCandleTimes({
-          market,
-          tf,
-          start: filled[0]!.time,
-          end: filled[filled.length - 1]!.time
-        });
-        const onlyMissing = filled.filter((r) => !existing.has(r.time));
-        const total = onlyMissing.length;
-        let inserted = 0;
-        for (const part of chunk(onlyMissing, 2000)) {
-          inserted += await upsertCandles(part, "missing");
+        if (params.mode === "missing") {
+          const existing = await selectExistingCandleTimes({
+            market,
+            tf,
+            start: filled[0]!.time,
+            end: filled[filled.length - 1]!.time
+          });
+          const onlyMissing = filled.filter((r) => !existing.has(r.time));
+
+          let inserted = 0;
+          for (const part of chunk(onlyMissing, 2000)) {
+            inserted += await upsertCandles(part, "missing");
+          }
+          log.info(`[candle] chunk done market=${market} tf=${tf} missing=${onlyMissing.length} inserted=${inserted}`);
+        } else {
+          let affected = 0;
+          for (const part of chunk(filled, 2000)) {
+            affected += await upsertCandles(part, "all");
+          }
+          log.info(`[candle] chunk done market=${market} tf=${tf} affected=${affected}`);
         }
-        log.info(`[candle] done market=${market} tf=${tf} missing=${total} inserted=${inserted}`);
-      } else {
-        let affected = 0;
-        for (const part of chunk(filled, 2000)) {
-          affected += await upsertCandles(part, "all");
-        }
-        log.info(`[candle] done market=${market} tf=${tf} upserted(affected)=${affected}`);
       }
+
+      log.info(`[candle] done market=${market} tf=${tf}`);
     }
   }
 }
@@ -183,7 +185,6 @@ export async function rebuildIndicators(params: {
     for (const tf of params.tfs) {
       log.info(`[indicator] start market=${market} tf=${tf} mode=${params.mode}`);
 
-      // warmup: 최대 120 SMA 고려 (여유로 200개)
       const tfMin = tfToMinutes(tf);
       const warmupSec = tfMin * 60 * 250;
 
@@ -202,17 +203,11 @@ export async function rebuildIndicators(params: {
 
       const packs = computeIndicators(candles);
 
-      // start~end 구간만 저장
       const rows: IndicatorRow[] = [];
       for (let i = 0; i < candles.length; i++) {
         const c = candles[i]!;
         if (c.time < params.startSec || c.time > params.endSec) continue;
-        rows.push({
-          market,
-          tf,
-          time: c.time,
-          indicators: packs[i]!
-        });
+        rows.push({ market, tf, time: c.time, indicators: packs[i]! });
       }
 
       if (rows.length === 0) {
@@ -228,6 +223,7 @@ export async function rebuildIndicators(params: {
           end: rows[rows.length - 1]!.time
         });
         const onlyMissing = rows.filter((r) => !existing.has(r.time));
+
         let inserted = 0;
         for (const part of chunk(onlyMissing, 2000)) {
           inserted += await upsertIndicators(part, "missing");
@@ -238,7 +234,7 @@ export async function rebuildIndicators(params: {
         for (const part of chunk(rows, 2000)) {
           affected += await upsertIndicators(part, "all");
         }
-        log.info(`[indicator] done market=${market} tf=${tf} upserted(affected)=${affected}`);
+        log.info(`[indicator] done market=${market} tf=${tf} affected=${affected}`);
       }
     }
   }

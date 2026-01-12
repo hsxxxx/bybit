@@ -20,7 +20,7 @@ export type UpbitCandle = {
 export type CandleRow = {
   market: string;
   tf: string;
-  time: number; // unix seconds (kst open time)
+  time: number;
   open: number;
   high: number;
   low: number;
@@ -30,7 +30,7 @@ export type CandleRow = {
 
 const http = axios.create({
   baseURL: "https://api.upbit.com",
-  timeout: 15000,
+  timeout: 20000,
   headers: { Accept: "application/json" }
 });
 
@@ -44,19 +44,15 @@ function shouldRetryUpbit(e: unknown): { retry: boolean; waitMs?: number; reason
   if (!isAxiosError(e)) return { retry: false };
   const status = e.response?.status;
 
-  // 429: 레이트리밋
   if (status === 429) {
     const ra = e.response?.headers?.["retry-after"];
     const waitMs = ra ? Number(ra) * 1000 : undefined;
     return { retry: true, waitMs, reason: "429 rate limited" };
   }
 
-  // 5xx, timeout, network
   if (!status) return { retry: true, reason: "network/timeout" };
   if (status >= 500) return { retry: true, reason: `server ${status}` };
 
-  // 400: Upbit는 때때로 잘못된 to/count 조합이나 비정상 파라미터에서 발생
-  // -> 동일 요청 재시도는 의미 없을 수도 있으니 기본은 재시도 안함
   return { retry: false, reason: `status ${status}` };
 }
 
@@ -71,9 +67,9 @@ function tfToUpbitUnit(tf: string): number {
 
 export async function fetchMinuteCandles(params: {
   market: string;
-  tf: string; // "1m" | "5m" | ...
-  toKstIso?: string; // inclusive-ish upper bound by Upbit semantics
-  count: number; // <= 200
+  tf: string;
+  toKstIso?: string;
+  count: number;
 }): Promise<CandleRow[]> {
   const unit = tfToUpbitUnit(params.tf);
 
@@ -92,7 +88,6 @@ export async function fetchMinuteCandles(params: {
       });
 
       const rows = res.data ?? [];
-      // Upbit 응답은 최신 -> 과거 순. 우리는 asc로 변환
       const mapped: CandleRow[] = rows
         .map((c) => ({
           market: c.market,
