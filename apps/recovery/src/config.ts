@@ -1,72 +1,79 @@
-import dotenv from "dotenv";
+import "dotenv/config";
 import type { Timeframe } from "./types";
 import { parseKstTextToEpochSeconds } from "./utils/time";
 
-dotenv.config();
-
-function req(name: string): string {
+function env(name: string, def?: string): string {
   const v = process.env[name];
-  if (!v) throw new Error(`Missing env: ${name}`);
+  if (v == null || v === "") {
+    if (def == null) throw new Error(`Missing env: ${name}`);
+    return def;
+  }
   return v;
 }
 
-function opt(name: string, def?: string): string | undefined {
-  return process.env[name] ?? def;
+function envInt(name: string, def: number): number {
+  const v = process.env[name];
+  if (v == null || v === "") return def;
+  const n = Number(v);
+  if (!Number.isFinite(n)) throw new Error(`Invalid int env: ${name}=${v}`);
+  return Math.floor(n);
 }
 
-export type Config = {
+function envBool(name: string, def: boolean): boolean {
+  const v = process.env[name];
+  if (v == null || v === "") return def;
+  return ["1", "true", "yes", "y", "on"].includes(String(v).toLowerCase());
+}
+
+function parseTfList(v: string): Timeframe[] {
+  const tfs = v.split(",").map((s) => s.trim()).filter(Boolean) as Timeframe[];
+  return tfs;
+}
+
+export type AppConfig = {
   db: {
     host: string;
     port: number;
     user: string;
     password: string;
     database: string;
+    connectionLimit: number;
   };
-  tfList: Timeframe[];
   marketFilter?: string;
+  tfList: Timeframe[];
   startSec: number;
   endSec: number;
   concurrency: number;
   mode: "candles" | "indicators" | "all";
   indicatorLookback: number;
+
+  // ✅ fill / verify
+  fill1m: boolean;
+  verify5m: boolean;
 };
 
-const TF_ALLOWED: Timeframe[] = ["1m", "5m", "15m", "1h", "4h"];
-
-export function loadConfig(): Config {
-  const tfListRaw = (opt("TF_LIST", "1m") ?? "1m")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  const tfList = tfListRaw.map((tf) => {
-    if (!TF_ALLOWED.includes(tf as Timeframe))
-      throw new Error(`Unsupported tf: ${tf}`);
-    return tf as Timeframe;
-  });
-
-  const startSec = parseKstTextToEpochSeconds(req("START_KST"));
-  const endSec = parseKstTextToEpochSeconds(req("END_KST"));
-  if (endSec < startSec) throw new Error("END_KST must be >= START_KST");
-
-  const modeRaw = (opt("MODE", "all") ?? "all").trim() as Config["mode"];
-  if (!["candles", "indicators", "all"].includes(modeRaw))
-    throw new Error(`Invalid MODE: ${modeRaw}`);
+export function loadConfig(): AppConfig {
+  const startKst = env("START_KST", "2026-01-01 00:00:00");
+  const endKst = env("END_KST", "2026-01-10 23:59:59");
 
   return {
     db: {
-      host: req("DB_HOST"),
-      port: Number(opt("DB_PORT", "3306")),
-      user: req("DB_USER"),
-      password: req("DB_PASSWORD"),
-      database: req("DB_DATABASE")
+      host: env("DB_HOST", "127.0.0.1"),
+      port: envInt("DB_PORT", 3306),
+      user: env("DB_USER", "root"),
+      password: env("DB_PASSWORD", ""),
+      database: env("DB_NAME", "bits"),
+      connectionLimit: envInt("DB_POOL", 5)
     },
-    tfList,
-    marketFilter: opt("MARKET_FILTER"),
-    startSec,
-    endSec,
-    concurrency: Number(opt("CONCURRENCY", "3")),
-    mode: modeRaw,
-    indicatorLookback: Number(opt("INDICATOR_LOOKBACK", "120"))
+    marketFilter: process.env.MARKET_FILTER || undefined,
+    tfList: parseTfList(env("TF_LIST", "1m,5m,15m,1h,4h")),
+    startSec: parseKstTextToEpochSeconds(startKst),
+    endSec: parseKstTextToEpochSeconds(endKst),
+    concurrency: envInt("CONCURRENCY", 1),
+    mode: (env("MODE", "all") as any) || "all",
+    indicatorLookback: envInt("INDICATOR_LOOKBACK", 600),
+
+    fill1m: envBool("FILL_1M", true),
+    verify5m: envBool("VERIFY_5M", true)
   };
 }

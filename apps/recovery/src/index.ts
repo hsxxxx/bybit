@@ -7,6 +7,8 @@ import { fetchMarkets } from "./upbit";
 import type { Timeframe } from "./types";
 import { recoverCandlesForMarketTf } from "./steps/recoverCandles";
 import { rebuildIndicatorsForMarketTf } from "./steps/rebuildIndicators";
+import { fillMissingCandles } from "./steps/fillMissingCandles";
+import { verifyVolume5m } from "./steps/verifyVolume5m";
 
 async function main() {
   const cfg = loadConfig();
@@ -17,7 +19,9 @@ async function main() {
     startSec: cfg.startSec,
     endSec: cfg.endSec,
     mode: cfg.mode,
-    concurrency: cfg.concurrency
+    concurrency: cfg.concurrency,
+    fill1m: cfg.fill1m,
+    verify5m: cfg.verify5m
   });
 
   const pool = createPool(cfg.db);
@@ -27,7 +31,6 @@ async function main() {
   if (markets.length === 0) throw new Error("No markets found");
   log.info(`markets loaded: ${markets.length}`);
 
-  // 진행 heartbeat (멈춘 것처럼 보이는 문제 방지)
   let doneCount = 0;
   const totalJobs = markets.length * cfg.tfList.length;
   const hb = setInterval(() => {
@@ -37,6 +40,7 @@ async function main() {
   const limit = pLimit(cfg.concurrency);
 
   const tasks: Array<Promise<void>> = [];
+
   for (const market of markets) {
     for (const tf of cfg.tfList) {
       tasks.push(
@@ -54,6 +58,17 @@ async function main() {
             });
           }
 
+          // ✅ 1m fill (candles 이후)
+          if (cfg.fill1m && tf === "1m") {
+            await fillMissingCandles({
+              pool,
+              market,
+              tf: "1m",
+              startSec: cfg.startSec,
+              endSec: cfg.endSec
+            });
+          }
+
           if (cfg.mode === "indicators" || cfg.mode === "all") {
             await rebuildIndicatorsForMarketTf({
               pool,
@@ -62,6 +77,18 @@ async function main() {
               startSec: cfg.startSec,
               endSec: cfg.endSec,
               lookback: cfg.indicatorLookback
+            });
+          }
+
+          // ✅ 5m 검증 (5m 작업 끝난 뒤)
+          if (cfg.verify5m && tf === "5m") {
+            await verifyVolume5m({
+              pool,
+              market,
+              startSec: cfg.startSec,
+              endSec: cfg.endSec,
+              epsilon: 1e-6,
+              limit: 200
             });
           }
 
