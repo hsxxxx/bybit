@@ -51,6 +51,7 @@ async function fetchCandlesRangeChunk(params: {
 
   let cursorEnd = end;
   let page = 0;
+  let lastOldest: number | null = null;
 
   while (cursorEnd >= start) {
     page += 1;
@@ -66,19 +67,29 @@ async function fetchCandlesRangeChunk(params: {
     });
 
     if (batch.length === 0) {
-      // 응답이 비면 더 과거로 이동
       cursorEnd -= 200 * stepSec;
       continue;
     }
+
+    const oldest = batch[0]!.time;
+    const newest = batch[batch.length - 1]!.time;
+
+    // ✅ 무한루프 방지: 같은 oldest가 반복되면 to가 무시/고정된 상태
+    if (lastOldest !== null && oldest === lastOldest) {
+      log.warn(`[fetch] no progress detected. force step back. oldest=${oldest} cursorEnd=${cursorEnd}`);
+      cursorEnd -= 200 * stepSec;
+      continue;
+    }
+    lastOldest = oldest;
 
     for (const r of batch) {
       if (r.time < start || r.time > end) continue;
       map.set(r.time, r);
     }
 
-    const oldest = batch[0]!.time;
-    const newest = batch[batch.length - 1]!.time;
-    log.info(`[fetch] ${params.market} ${params.tf} got=${batch.length} range=[${oldest}..${newest}] uniq=${map.size}`);
+    log.info(
+      `[fetch] ${params.market} ${params.tf} got=${batch.length} range=[${oldest}..${newest}] uniq=${map.size}`
+    );
 
     cursorEnd = oldest - stepSec;
     if (oldest <= start) break;
@@ -86,6 +97,7 @@ async function fetchCandlesRangeChunk(params: {
 
   return Array.from(map.values()).sort((a, b) => a.time - b.time);
 }
+
 
 function gapFillCandles(params: {
   market: string;

@@ -2,25 +2,21 @@ import dayjs from "dayjs";
 
 /**
  * Upbit candle_date_time_kst: "2026-01-01T00:08:00"
- * -> unix seconds (KST 기준의 candle open time)
- *
- * 주의: JS Date는 UTC로 파싱할 수 있으므로, KST 문자열을 +09:00로 명시한다.
+ * -> unix seconds (KST 기준 candle open time)
  */
 export function kstIsoToUnixSec(kstIso: string): number {
-  // "2026-01-01T00:08:00" -> "2026-01-01T00:08:00+09:00"
   const iso = kstIso.endsWith("Z") || kstIso.includes("+") ? kstIso : `${kstIso}+09:00`;
   const ms = dayjs(iso).valueOf();
   return Math.floor(ms / 1000);
 }
 
+/**
+ * unix seconds -> "YYYY-MM-DDTHH:mm:ss" (KST, timezone suffix 없이)
+ * Upbit `to` 파라미터에 그대로 넣기 위함.
+ */
 export function unixSecToKstIso(unixSec: number): string {
-  // KST로 고정 표기
-  const d = new Date(unixSec * 1000);
-  // UTC ms +09:00 표현을 위해 toISOString() 기반으로 shift 하는 방식 대신,
-  // 한국환경(Asia/Seoul) 의존을 피하려면 수동으로 +9h.
-  const kstMs = d.getTime() + 9 * 60 * 60 * 1000;
-  const kst = new Date(kstMs).toISOString().replace(".000Z", "");
-  return kst; // "YYYY-MM-DDTHH:mm:ss"
+  // dayjs는 utcOffset(분) 지원 (플러그인 불필요)
+  return dayjs.unix(unixSec).utcOffset(9 * 60).format("YYYY-MM-DDTHH:mm:ss");
 }
 
 export function tfToMinutes(tf: string): number {
