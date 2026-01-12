@@ -10,8 +10,9 @@ import {
   type CandleRow,
   type IndicatorRow
 } from "./db.js";
-import { buildTimeGrid, tfToMinutes, floorToTf, unixSecToKstIso } from "./time.js";
+import { buildTimeGrid, tfToMinutes, floorToTf, unixSecToKstIso, unixSecToUpbitToParam } from "./time.js";
 import { computeIndicators } from "./indicators.js";
+
 
 function chunk<T>(arr: T[], n: number): T[][] {
   const out: T[][] = [];
@@ -55,7 +56,7 @@ async function fetchCandlesRangeChunk(params: {
 
   while (cursorEnd >= start) {
     page += 1;
-    const toIso = unixSecToKstIso(cursorEnd);
+    const toIso = unixSecToUpbitToParam(cursorEnd);
 
     log.info(`[fetch] ${params.market} ${params.tf} page=${page} to=${toIso}`);
 
