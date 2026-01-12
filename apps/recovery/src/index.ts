@@ -3,7 +3,7 @@ import { pingDb, selectDistinctMarkets } from "./db.js";
 import { log } from "./logger.js";
 import { DEFAULT_TFS, type Mode, type Tf } from "./config.js";
 import { recoverCandles, rebuildIndicators } from "./recover.js";
-import { kstIsoToUnixSec } from "./time.js";
+import { kstIsoToUnixSec, unixSecToKstIso } from "./time.js";
 
 function parseCsvList(v?: string): string[] | undefined {
   if (!v) return undefined;
@@ -16,8 +16,7 @@ function parseCsvList(v?: string): string[] | undefined {
 function parseTfs(v?: string): Tf[] {
   if (!v) return [...DEFAULT_TFS];
   const arr = parseCsvList(v) ?? [];
-  const out = arr.map((x) => x.toLowerCase()) as Tf[];
-  return out;
+  return arr.map((x) => x.toLowerCase()) as Tf[];
 }
 
 function parseMode(v?: string): Mode {
@@ -25,17 +24,11 @@ function parseMode(v?: string): Mode {
   return "missing";
 }
 
-function parseKstIsoToSec(v: string): number {
-  // 입력: "2026-01-01T00:00:00" (KST 가정)
-  return kstIsoToUnixSec(v);
-}
-
 async function main() {
   const program = new Command();
 
   program
     .name("bits-recovery")
-    .description("Upbit candle/indicator recovery (KST candle_date_time_kst 기준 time 통일)")
     .requiredOption("--start <kstIso>", "KST ISO start (e.g. 2026-01-01T00:00:00)")
     .requiredOption("--end <kstIso>", "KST ISO end (e.g. 2026-01-02T00:00:00)")
     .option("--mode <mode>", "all | missing", "missing")
@@ -47,22 +40,27 @@ async function main() {
   program.parse(process.argv);
   const opts = program.opts();
 
-  const startSec = parseKstIsoToSec(String(opts.start));
-  const endSec = parseKstIsoToSec(String(opts.end));
+  const startSec = kstIsoToUnixSec(String(opts.start));
+  const endSec = kstIsoToUnixSec(String(opts.end));
   const mode = parseMode(String(opts.mode));
   const tfs = parseTfs(String(opts.tfs));
+
+  if (endSec < startSec) throw new Error("end must be >= start");
 
   await pingDb();
 
   let markets = parseCsvList(opts.markets);
   if (!markets || markets.length === 0) {
     markets = await selectDistinctMarkets();
-    if (markets.length === 0) {
-      throw new Error("No markets found in DB. Provide --markets=KRW-BTC,...");
-    }
+    if (markets.length === 0) throw new Error("No markets found in DB. Provide --markets=KRW-BTC,...");
   }
 
-  log.info(`[run] mode=${mode} markets=${markets.length} tfs=${tfs.join(",")} start=${opts.start} end=${opts.end}`);
+  // ✅ 핵심: 실제 파싱된 초/재변환 로그
+  log.info(
+    `[run] mode=${mode} markets=${markets.length} tfs=${tfs.join(",")} ` +
+      `start=${opts.start}(${startSec} -> ${unixSecToKstIso(startSec)}) ` +
+      `end=${opts.end}(${endSec} -> ${unixSecToKstIso(endSec)})`
+  );
 
   if (opts.candle !== false) {
     await recoverCandles({ markets, tfs, startSec, endSec, mode });

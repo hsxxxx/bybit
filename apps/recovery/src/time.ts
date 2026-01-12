@@ -1,18 +1,19 @@
-import dayjs from "dayjs";
-
 /**
- * "2026-01-01T00:08:00" (KST) -> unix seconds
+ * "YYYY-MM-DDTHH:mm:ss" 를 KST(+09:00)로 강제 파싱해서 unix seconds 반환
+ * dayjs 의존 제거 (환경/플러그인/타입 이슈 방지)
  */
 export function kstIsoToUnixSec(kstIso: string): number {
-  const iso = kstIso.endsWith("Z") || kstIso.includes("+")
-    ? kstIso
-    : `${kstIso}+09:00`;
-  return Math.floor(dayjs(iso).valueOf() / 1000);
+  const s = kstIso.includes("Z") || kstIso.includes("+") ? kstIso : `${kstIso}+09:00`;
+  const ms = Date.parse(s);
+  if (!Number.isFinite(ms)) {
+    throw new Error(`Invalid KST ISO: ${kstIso}`);
+  }
+  return Math.floor(ms / 1000);
 }
 
 /**
  * unix seconds -> "YYYY-MM-DDTHH:mm:ss" (KST)
- * dayjs plugin 없이 안전하게 처리
+ * Upbit to 파라미터에 사용 (timezone suffix 없이)
  */
 export function unixSecToKstIso(unixSec: number): string {
   const kstMs = unixSec * 1000 + 9 * 60 * 60 * 1000;
