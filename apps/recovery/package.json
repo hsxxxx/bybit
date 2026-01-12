@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "ts-node --esm src/index.ts",
+    "dev": "node --loader ts-node/esm --no-warnings src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js"
   },
@@ -19,5 +19,9 @@
     "@types/node": "^22.10.10",
     "ts-node": "^10.9.2",
     "typescript": "^5.6.3"
+  },
+  "ts-node": {
+    "esm": true,
+    "transpileOnly": true
   }
 }
