@@ -1,12 +1,12 @@
-import { Kafka, logLevel, type Producer } from 'kafkajs';
-import { config } from './config.js';
+import { Kafka, logLevel, type Producer } from "kafkajs";
+import { config } from "./config";
 
 export type RawCandleMessage = {
-  exchange: 'upbit';
-  type: 'candle.1m';
-  market: string;           // KRW-BTC
-  recv_ts: number;          // local receive timestamp (ms)
-  payload: unknown;         // raw Upbit WS message
+  exchange: "bybit";
+  type: "kline.1m";
+  symbol: string;      // BTCUSDT
+  recv_ts: number;     // local receive timestamp (ms)
+  payload: unknown;    // raw Bybit WS message
 };
 
 export class KafkaOut {
@@ -16,11 +16,12 @@ export class KafkaOut {
     const kafka = new Kafka({
       clientId: config.kafka.clientId,
       brokers: config.kafka.brokers,
-      logLevel: logLevel.NOTHING
+      logLevel: logLevel.NOTHING,
     });
+
     this.producer = kafka.producer({
       allowAutoTopicCreation: true,
-      idempotent: false
+      idempotent: false,
     });
   }
 
@@ -33,15 +34,14 @@ export class KafkaOut {
   }
 
   async sendRaw1m(msg: RawCandleMessage) {
-    const value = JSON.stringify(msg);
     await this.producer.send({
       topic: config.kafka.topicRaw1m,
       messages: [
         {
-          key: msg.market,
-          value
-        }
-      ]
+          key: msg.symbol,
+          value: JSON.stringify(msg),
+        },
+      ],
     });
   }
 }

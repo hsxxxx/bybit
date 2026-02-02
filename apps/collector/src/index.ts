@@ -1,12 +1,12 @@
-import { KafkaOut } from './kafka.js';
-import { UpbitCollector } from './upbit.js';
+import { KafkaOut } from "./kafka";
+import { BybitCollector } from "./bybit";
 
 async function main() {
   const kafka = new KafkaOut();
   await kafka.connect();
-  console.log('[collector] kafka connected');
+  console.log("[collector] kafka connected");
 
-  const collector = new UpbitCollector(kafka);
+  const collector = new BybitCollector(kafka);
   await collector.start();
 
   const shutdown = async (sig: string) => {
@@ -16,11 +16,11 @@ async function main() {
     process.exit(0);
   };
 
-  process.on('SIGINT', () => void shutdown('SIGINT'));
-  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
 }
 
 main().catch((e) => {
-  console.error('[collector] fatal', e);
+  console.error("[collector] fatal", e);
   process.exit(1);
 });
