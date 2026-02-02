@@ -1,8 +1,8 @@
 // apps/builder/src/indicator.ts
-import type { Candle, Timeframe } from './candle.js';
+import type { Candle, Timeframe, Exchange } from "./candle.js";
 
 export type Indicator = {
-  exchange: 'upbit';
+  exchange: Exchange;
   market: string;
   tf: Timeframe;
 
@@ -15,8 +15,8 @@ export type Indicator = {
   bb_mid_20: number | null;
   bb_upper_20_2: number | null;
   bb_lower_20_2: number | null;
-  bb_width_20: number | null;   // (upper-lower)/mid
-  bb_pos_20: number | null;     // (close-lower)/(upper-lower)
+  bb_width_20: number | null; // (upper-lower)/mid
+  bb_pos_20: number | null; // (close-lower)/(upper-lower)
 
   // MA (50, 200, 400, 800) + special 7 (esp for 4h)
   ma_7: number | null;
@@ -38,7 +38,7 @@ export type Indicator = {
   stoch_rsi_k: number | null;
   stoch_rsi_d: number | null;
 
-  // OBV / PVT (cumulative; slopes are more useful than absolute level)
+  // OBV / PVT
   obv: number | null;
   obv_slope_5: number | null;
   obv_slope_20: number | null;
@@ -47,11 +47,11 @@ export type Indicator = {
   pvt_slope_5: number | null;
   pvt_slope_20: number | null;
 
-  // simple returns (handy facts)
-  ret_1: number | null;   // vs prev candle close (same tf)
-  ret_5: number | null;   // 5 bars ago (same tf)
+  // returns
+  ret_1: number | null;
+  ret_5: number | null;
 
-  indicator_version: 'v1';
+  indicator_version: "v1";
 };
 
 function mean(xs: number[]): number {
@@ -71,7 +71,6 @@ function pctChange(a: number, b: number): number {
   return b / a - 1;
 }
 
-/** RSI(14) - Wilder smoothing using rolling window approximation (sufficient for signals) */
 function rsi14(closes: number[]): number | null {
   const period = 14;
   if (closes.length < period + 1) return null;
@@ -90,18 +89,15 @@ function rsi14(closes: number[]): number | null {
   return 100 - 100 / (1 + rs);
 }
 
-/** Stoch RSI: compute RSI series (last N), then stoch over last 14 RSI points, then smooth K/D */
 function stochRsi(closes: number[]): { k: number | null; d: number | null } {
-  const rsiLen = 14, stochLen = 14, smoothK = 3, smoothD = 3;
-
-  // Need enough closes to compute at least (rsiLen + stochLen + smoothK + smoothD) roughly.
-  // We'll compute RSI values for recent window and then stoch them.
+  const rsiLen = 14,
+    stochLen = 14,
+    smoothK = 3,
+    smoothD = 3;
   const need = rsiLen + stochLen + smoothK + smoothD + 5;
   if (closes.length < need) return { k: null, d: null };
 
-  // Build RSI series for last (stochLen + smoothK + smoothD + 10) points
   const rsiSeries: number[] = [];
-  // compute RSI at each step for last window
   const start = Math.max(0, closes.length - (stochLen + smoothK + smoothD + 20));
   for (let i = start + rsiLen; i < closes.length; i++) {
     const slice = closes.slice(0, i + 1);
@@ -110,17 +106,16 @@ function stochRsi(closes: number[]): { k: number | null; d: number | null } {
   }
   if (rsiSeries.length < stochLen + smoothK + smoothD) return { k: null, d: null };
 
-  // Compute raw stochRSI values (last stochLen)
   const raw: number[] = [];
   for (let i = stochLen - 1; i < rsiSeries.length; i++) {
     const win = rsiSeries.slice(i - (stochLen - 1), i + 1);
     const lo = Math.min(...win);
     const hi = Math.max(...win);
     const cur = rsiSeries[i];
-    const v = (hi === lo) ? 0 : (cur - lo) / (hi - lo);
+    const v = hi === lo ? 0 : (cur - lo) / (hi - lo);
     raw.push(v * 100);
   }
-  // Smooth K
+
   const kArr: number[] = [];
   for (let i = smoothK - 1; i < raw.length; i++) {
     kArr.push(mean(raw.slice(i - (smoothK - 1), i + 1)));
@@ -132,7 +127,7 @@ function stochRsi(closes: number[]): { k: number | null; d: number | null } {
   return { k, d };
 }
 
-function bb20(closes: number[]): { mid: number|null; upper: number|null; lower: number|null; width: number|null; pos: number|null } {
+function bb20(closes: number[]) {
   const period = 20;
   if (closes.length < period) return { mid: null, upper: null, lower: null, width: null, pos: null };
   const win = closes.slice(closes.length - period);
@@ -140,8 +135,8 @@ function bb20(closes: number[]): { mid: number|null; upper: number|null; lower: 
   const sd = stdev(win);
   const upper = m + 2 * sd;
   const lower = m - 2 * sd;
-  const width = (m === 0) ? null : (upper - lower) / m;
-  const denom = (upper - lower);
+  const width = m === 0 ? null : (upper - lower) / m;
+  const denom = upper - lower;
   const pos = denom === 0 ? null : (closes[closes.length - 1] - lower) / denom;
   return { mid: m, upper, lower, width, pos };
 }
@@ -153,13 +148,9 @@ function slope(values: number[], lookback: number): number | null {
   return b - a;
 }
 
-/**
- * Build indicators from a CLOSED candle stream window (chronological).
- * window must include current candle as last element.
- */
 export function buildIndicatorFromWindow(tf: Timeframe, window: Candle[]): Indicator {
   const c = window[window.length - 1];
-  const closes = window.map(x => x.close);
+  const closes = window.map((x) => x.close);
 
   const bb = bb20(closes);
 
@@ -169,12 +160,11 @@ export function buildIndicatorFromWindow(tf: Timeframe, window: Candle[]): Indic
   const ma400 = sma(closes, 400);
   const ma800 = sma(closes, 800);
 
-  const dist = (ma: number | null) => (ma ? (c.close / ma - 1) : null);
+  const dist = (ma: number | null) => (ma ? c.close / ma - 1 : null);
 
   const rsi = rsi14(closes);
   const st = stochRsi(closes);
 
-  // OBV / PVT cumulative from window start (relative is fine; slopes are meaningful)
   const obvSeries: number[] = [];
   const pvtSeries: number[] = [];
   let obv = 0;
@@ -189,7 +179,7 @@ export function buildIndicatorFromWindow(tf: Timeframe, window: Candle[]): Indic
     const prev = window[i - 1];
     if (cur.close > prev.close) obv += cur.volume;
     else if (cur.close < prev.close) obv -= cur.volume;
-    // PVT: prevClose 기준
+
     const chg = pctChange(prev.close, cur.close);
     pvt += cur.volume * chg;
     obvSeries.push(obv);
@@ -200,7 +190,7 @@ export function buildIndicatorFromWindow(tf: Timeframe, window: Candle[]): Indic
   const ret5 = window.length >= 6 ? pctChange(window[window.length - 6].close, c.close) : null;
 
   return {
-    exchange: 'upbit',
+    exchange: c.exchange,
     market: c.market,
     tf,
     open_time: c.open_time,
@@ -241,6 +231,6 @@ export function buildIndicatorFromWindow(tf: Timeframe, window: Candle[]): Indic
     ret_1: ret1,
     ret_5: ret5,
 
-    indicator_version: 'v1'
+    indicator_version: "v1",
   };
 }
