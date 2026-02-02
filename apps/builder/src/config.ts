@@ -9,11 +9,11 @@ function req(name: string, fallback?: string): string {
 export const config = {
   kafka: {
     brokers: req("KAFKA_BROKERS").split(",").map((s) => s.trim()),
-    clientId: req("KAFKA_CLIENT_ID", "bits-builder"),
-    groupId: req("KAFKA_GROUP_ID", "bits-builder-v1"),
+    clientId: req("KAFKA_CLIENT_ID", "bybit-builder"),
+    groupId: req("KAFKA_GROUP_ID", "bybit-builder-v1"),
 
     // collector가 confirm=true 1m 확정봉만 publish 하는 입력 토픽
-    inRaw1m: req("KAFKA_TOPIC_IN_RAW_1M", "bybit.candle.1m.closed"),
+    inRaw1m: req("KAFKA_TOPIC_IN_RAW_1M", "bybit.kline1m.raw"),
 
     // builder가 표준화/집계 후 내보내는 출력 토픽들
     out1m: req("KAFKA_TOPIC_OUT_1M", "bybit.candle.1m"),
