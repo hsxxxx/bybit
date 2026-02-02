@@ -22,7 +22,7 @@ export class BybitCollector {
   private state: CollectorState = { stopped: false };
   private pingTimer?: NodeJS.Timeout;
 
-  constructor(private kafka: KafkaOut) {}
+  constructor(private kafka: KafkaOut) { }
 
   async start() {
     this.state.stopped = false;
@@ -88,15 +88,16 @@ export class BybitCollector {
           const text = decodeWsData(data);
           const payload = JSON.parse(text) as any;
 
-          // ignore non-data frames (subscribe ack, pong, etc.)
-          // data frames typically include: { topic, type, data: [...] }
           const topic: string | undefined = payload?.topic;
           const arr = payload?.data;
           if (!topic || !Array.isArray(arr) || arr.length === 0) return;
 
-          // topic example: "kline.1.BTCUSDT"
+          const k = arr[0];
+          // ✅ 1분봉 마감(확정)만 통과
+          if (k?.confirm !== true) return;
+
           const parts = topic.split(".");
-          const symbol = parts[2] || arr?.[0]?.symbol;
+          const symbol = parts[2] || k?.symbol;
           if (!symbol || typeof symbol !== "string") return;
 
           await this.kafka.sendRaw1m({
