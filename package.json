@@ -1,5 +1,5 @@
 {
-  "name": "bits",
+  "name": "bybit",
   "private": true,
   "workspaces": [
     "apps/*",
